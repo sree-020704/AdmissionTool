@@ -1,12 +1,12 @@
-import { env } from '../../core/config/env.js';
-import { isOpenAiConfigured } from '../../shared/services/openai.client.js';
+import { env } from "../../core/config/env.js";
+import { isGeminiConfigured } from "../../shared/services/gemini.client.js";
 
 /**
  * AI verification is active only when explicitly enabled AND an OpenAI key is set.
  * When this is false, the workflow falls back to the legacy auto-advance behavior.
  */
 export function isAiVerificationEnabled() {
-  return Boolean(env.AI_VERIFICATION_ENABLED) && isOpenAiConfigured();
+  return Boolean(env.AI_VERIFICATION_ENABLED) && isGeminiConfigured();
 }
 
 export const AI_VERIFY_THRESHOLDS = {

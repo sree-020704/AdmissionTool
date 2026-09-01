@@ -13,9 +13,10 @@ import {
 } from '../../shared/helpers/workflowExecution.helper.js';
 import { formatDocumentRequirements, getIntakeDocumentRequirement } from '../../shared/helpers/applicationDocument.helper.js';
 import { prepareDocumentForVerification } from '../../shared/services/document-text.service.js';
-import { ensureApplicationFileLocal } from '../../shared/services/applicationFile.storage.js';
-import { chatJson, chatVisionJson } from '../../shared/services/openai.client.js';
-import { retrieveRelevantChunks } from '../../shared/services/rag.service.js';
+import {
+  chatJson,
+  chatVisionJson,
+} from '../../shared/services/gemini.client.js';import { retrieveRelevantChunks } from '../../shared/services/rag.service.js';
 import { refreshApplicationRuntime } from '../../shared/services/applicationRuntime.service.js';
 import { notifyApplicationStatusChange } from '../../shared/templates/applicationEmails.js';
 import { createNotification } from '../notifications/notification.service.js';
@@ -430,8 +431,7 @@ async function gatherApplicationDocuments(application) {
   let anyUnreadable = false;
 
   for (const document of application.documents ?? []) {
-    const localPath = await ensureApplicationFileLocal(document);
-    const prep = await prepareDocumentForVerification(localPath, document.mimeType);
+    const prep = await prepareDocumentForVerification(document.filePath, document.mimeType);
     const entry = {
       requirementName: document.requirementName,
       originalName: document.originalName,

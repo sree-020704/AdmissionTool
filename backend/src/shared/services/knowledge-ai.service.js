@@ -1,8 +1,9 @@
-import { chatJson, isOpenAiConfigured } from './openai.client.js';
-import { buildCombinedDocumentText } from './document-text.service.js';
-import { buildHeuristicServiceInsights } from './knowledge-heuristics.service.js';
-import { logger } from '../../core/logger/index.js';
-import { env } from '../../core/config/env.js';
+import { GoogleGenAI } from "@google/genai";
+import { buildCombinedDocumentText } from "./document-text.service.js";
+import { buildHeuristicServiceInsights } from "./knowledge-heuristics.service.js";
+import { logger } from "../../core/logger/index.js";
+import { env } from "../../core/config/env.js";
+
 import {
   serviceInsightsResponseSchema,
   offeringEligibilityResponseSchema,
@@ -10,19 +11,22 @@ import {
   offeringWorkflowSkeletonResponseSchema,
   offeringWorkflowOutcomesResponseSchema,
   offeringQueueResponseSchema,
-} from '../schemas/knowledge-ai.schemas.js';
-import { mergeWorkflowSkeletonAndOutcomes } from '../helpers/workflow.helper.js';
+} from "../schemas/knowledge-ai.schemas.js";
+
+import { mergeWorkflowSkeletonAndOutcomes } from "../helpers/workflow.helper.js";
+
 import {
   ensureAdmissionWorkflowSkeleton,
   ensureAdmissionStepOutcomes,
   buildCanonicalAdmissionStepOutcomes,
-} from '../helpers/admission-workflow.helper.js';
-import { normalizeServiceInsightsPayload } from '../helpers/normalize-ai-response.helper.js';
+} from "../helpers/admission-workflow.helper.js";
+
+import { normalizeServiceInsightsPayload } from "../helpers/normalize-ai-response.helper.js";
+
 import {
   extractStructuredOfferingsFromText,
   prepareInsightsDocumentText,
   mergeSuggestedOfferings,
-  filterProgrammeOfferings,
   focusDocumentForOffering,
   extractEligibilityRulesFromText,
   mergeEligibilityRules,
@@ -30,7 +34,8 @@ import {
   mergeDocumentRequirements,
   extractQueueSettingsFromText,
   extractPaymentSettingsFromText,
-} from '../helpers/structured-offerings.helper.js';
+} from "../helpers/structured-offerings.helper.js";
+
 import {
   SERVICE_INSIGHTS_SYSTEM_PROMPT,
   buildServiceInsightsUserPrompt,
@@ -45,59 +50,281 @@ import {
   OFFERING_WORKFLOW_SKELETON_SYSTEM_PROMPT,
   OFFERING_WORKFLOW_OUTCOMES_SYSTEM_PROMPT,
   OFFERING_QUEUE_SYSTEM_PROMPT,
-} from '../prompts/index.js';
+} from "../prompts/index.js";
+
+/* ============================================================
+   GEMINI CONFIGURATION
+   ============================================================ */
+
+const GEMINI_API_KEY =
+  process.env.GEMINI_API_KEY?.trim() || env.GEMINI_API_KEY?.trim() || "";
+
+const GEMINI_MODEL =
+  process.env.GEMINI_MODEL?.trim() ||
+  env.GEMINI_MODEL?.trim() ||
+  "gemini-2.5-flash";
+
+function isGeminiConfigured() {
+  return Boolean(GEMINI_API_KEY);
+}
+
+/* ============================================================
+   GEMINI ERROR FORMATTER
+   ============================================================ */
+
+function formatGeminiError(err) {
+  const msg = err?.message ?? String(err);
+  const lower = msg.toLowerCase();
+
+  if (
+    lower.includes("api key") ||
+    lower.includes("apikey") ||
+    lower.includes("401") ||
+    lower.includes("403") ||
+    lower.includes("permission")
+  ) {
+    return (
+      "Gemini API authentication failed. Check GEMINI_API_KEY " +
+      "and make sure the key has access to the configured model."
+    );
+  }
+
+  if (
+    lower.includes("429") ||
+    lower.includes("quota") ||
+    lower.includes("resource exhausted") ||
+    lower.includes("rate limit")
+  ) {
+    return (
+      "Gemini API quota or rate limit was exceeded. " +
+      "Showing fallback results."
+    );
+  }
+
+  if (
+    lower.includes("timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("abort")
+  ) {
+    return (
+      "Gemini analysis timed out while processing the document. " +
+      "Showing fallback results."
+    );
+  }
+
+  if (
+    lower.includes("404") ||
+    lower.includes("not found") ||
+    lower.includes("model")
+  ) {
+    return (
+      `Gemini model "${GEMINI_MODEL}" is unavailable or not accessible. ` +
+      "Check GEMINI_MODEL in backend/.env."
+    );
+  }
+
+  return `Gemini analysis failed: ${msg}`;
+}
+
+/* ============================================================
+   GEMINI JSON CALL
+   ============================================================ */
+
+/**
+ * Calls Gemini and converts the response into JSON.
+ *
+ * Existing Zod schemas are preserved.
+ */
+async function geminiChatJson({ system, user, schema, normalize, timeoutMs }) {
+  if (!isGeminiConfigured()) {
+    throw new Error("GEMINI_API_KEY is not configured");
+  }
+
+  const ai = new GoogleGenAI({
+    apiKey: GEMINI_API_KEY,
+  });
+
+  const controller = new AbortController();
+
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs ?? 120000);
+
+  try {
+    logger.debug(
+      {
+        model: GEMINI_MODEL,
+      },
+      "Calling Gemini",
+    );
+
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: user,
+            },
+          ],
+        },
+      ],
+
+      config: {
+        systemInstruction: system,
+
+        responseMimeType: "application/json",
+
+        temperature: 0.2,
+
+        abortSignal: controller.signal,
+      },
+    });
+
+    const text = response?.text?.trim();
+
+    if (!text) {
+      throw new Error("Gemini returned an empty response");
+    }
+
+    let parsed;
+
+    try {
+      parsed = JSON.parse(text);
+    } catch (parseErr) {
+      logger.error(
+        {
+          error: parseErr.message,
+          responsePreview: text.slice(0, 1000),
+        },
+        "Gemini returned invalid JSON",
+      );
+
+      throw new Error("Gemini returned invalid JSON");
+    }
+
+    const normalized = normalize ? normalize(parsed) : parsed;
+
+    if (schema?.parse) {
+      return schema.parse(normalized);
+    }
+
+    return normalized;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/* ============================================================
+   SERVICE KNOWLEDGE INSIGHTS
+   ============================================================ */
 
 /**
  * @param {{ name: string, description?: string }} service
  * @param {Array} documents
  */
 export async function generateServiceInsights(service, documents) {
-  const fullDocText = await buildCombinedDocumentText(documents);
-  const structuredOfferings = extractStructuredOfferingsFromText(fullDocText);
-  const insightsDocText = prepareInsightsDocumentText(fullDocText);
+  let fullDocText = "";
 
-  if (!isOpenAiConfigured()) {
+  try {
+    fullDocText = await buildCombinedDocumentText(documents);
+  } catch (err) {
+    logger.error(
+      {
+        error: err.message,
+      },
+      "Failed to build combined document text",
+    );
+
     return finalizeInsights(
-      buildHeuristicServiceInsights(service, fullDocText, structuredOfferings),
-      structuredOfferings,
-      'heuristic',
-      null,
+      buildHeuristicServiceInsights(service, "", []),
+      [],
+      "heuristic",
+      `Document text extraction failed: ${err.message}`,
     );
   }
 
-  if (!fullDocText.trim()) {
+  const safeDocText = typeof fullDocText === "string" ? fullDocText : "";
+
+  const structuredOfferings = extractStructuredOfferingsFromText(safeDocText);
+
+  const insightsDocText = prepareInsightsDocumentText(safeDocText);
+
+  /*
+   * No Gemini configuration:
+   * use existing heuristic implementation.
+   */
+  if (!isGeminiConfigured()) {
+    logger.warn("GEMINI_API_KEY is not configured; using heuristic analysis");
+
     return finalizeInsights(
-      buildHeuristicServiceInsights(service, fullDocText, structuredOfferings),
+      buildHeuristicServiceInsights(service, safeDocText, structuredOfferings),
       structuredOfferings,
-      'heuristic',
-      'No readable text in uploaded files.',
+      "heuristic",
+      "Gemini API key is not configured. Showing basic fallback results.",
+    );
+  }
+
+  /*
+   * No extracted document text.
+   *
+   * IMPORTANT:
+   * This does NOT mean the PDF is necessarily scanned.
+   * It means the extraction pipeline returned no text.
+   */
+  if (!safeDocText.trim()) {
+    logger.warn(
+      {
+        service: service.name,
+        documentCount: documents?.length ?? 0,
+      },
+      "Document extraction returned empty text",
+    );
+
+    return finalizeInsights(
+      buildHeuristicServiceInsights(service, safeDocText, structuredOfferings),
+      structuredOfferings,
+      "heuristic",
+      "Document extraction returned no readable text. Check document-text.service.js and the PDF parser configuration.",
     );
   }
 
   try {
-    const result = await chatJson({
+    const result = await geminiChatJson({
       system: SERVICE_INSIGHTS_SYSTEM_PROMPT,
+
       user: buildServiceInsightsUserPrompt({
         serviceName: service.name,
         serviceDescription: service.description,
         docText: insightsDocText,
       }),
+
       schema: serviceInsightsResponseSchema,
+
       normalize: normalizeServiceInsightsPayload,
-      timeoutMs: env.OPENAI_INSIGHTS_TIMEOUT_MS,
+
+      timeoutMs:
+        env.GEMINI_INSIGHTS_TIMEOUT_MS ??
+        env.OPENAI_INSIGHTS_TIMEOUT_MS ??
+        120000,
     });
 
     const mergedOfferings = mergeSuggestedOfferings(
-      filterProgrammeOfferings(result.suggestedOfferings),
+      result.suggestedOfferings ?? [],
       structuredOfferings,
     );
 
-    const gaps = [...result.gaps];
+    const gaps = [...(result.gaps ?? [])];
+
     if (mergedOfferings.length === 0) {
       gaps.push(
-        'No explicitly named offerings were found in the document. Add clearer intake/category labels to the document, or create offerings manually.',
+        "No explicitly named offerings were found in the document. Add clearer intake/category labels to the document, or create offerings manually.",
       );
-    } else if (result.suggestedOfferings.length < structuredOfferings.length) {
+    } else if (
+      (result.suggestedOfferings?.length ?? 0) < structuredOfferings.length
+    ) {
       gaps.push(
         `Structured catalogue listed ${structuredOfferings.length} offerings; merged list has ${mergedOfferings.length} after combining AI + document headers.`,
       );
@@ -106,26 +333,51 @@ export async function generateServiceInsights(service, documents) {
     return finalizeInsights(
       {
         understandingSummary: result.understandingSummary,
+
         chatbotReadinessSummary: result.chatbotReadinessSummary,
+
         chatbotCanAnswer: result.chatbotCanAnswer,
+
         gaps,
+
         suggestedOfferings: mergedOfferings,
       },
+
       structuredOfferings,
-      'openai',
+
+      "gemini",
+
       null,
     );
   } catch (err) {
-    logger.warn({ err: err.message }, 'OpenAI service insights failed; using heuristics');
-    const friendly = formatOpenAiError(err);
+    logger.warn(
+      {
+        error: err.message,
+        service: service.name,
+      },
+      "Gemini service insights failed; using heuristics",
+    );
+
+    const friendly = formatGeminiError(err);
+
     const heuristic = buildHeuristicServiceInsights(
       service,
-      fullDocText,
+      safeDocText,
       structuredOfferings,
     );
-    return finalizeInsights(heuristic, structuredOfferings, 'heuristic', friendly);
+
+    return finalizeInsights(
+      heuristic,
+      structuredOfferings,
+      "heuristic",
+      friendly,
+    );
   }
 }
+
+/* ============================================================
+   FINALIZE SERVICE INSIGHTS
+   ============================================================ */
 
 /**
  * @param {{
@@ -133,56 +385,79 @@ export async function generateServiceInsights(service, documents) {
  *   chatbotReadinessSummary: string,
  *   chatbotCanAnswer: string[],
  *   gaps: string[],
- *   suggestedOfferings: Array<{ name: string, description?: string, documentExcerpt: string }>,
+ *   suggestedOfferings: Array<{
+ *     name: string,
+ *     description?: string,
+ *     documentExcerpt: string
+ *   }>,
  * }} base
+ *
  * @param {Array} structuredOfferings
- * @param {'openai'|'heuristic'} analysisMode
+ *
+ * @param {'gemini'|'openai'|'heuristic'} analysisMode
+ *
  * @param {string|null} analysisWarning
  */
-function finalizeInsights(base, structuredOfferings, analysisMode, analysisWarning) {
+function finalizeInsights(
+  base,
+  structuredOfferings,
+  analysisMode,
+  analysisWarning,
+) {
   const merged = mergeSuggestedOfferings(
-    filterProgrammeOfferings(base.suggestedOfferings ?? []),
-    structuredOfferings,
+    base?.suggestedOfferings ?? [],
+    structuredOfferings ?? [],
   );
-  const gaps = [...(base.gaps ?? [])];
+
+  const gaps = [...(base?.gaps ?? [])];
 
   if (merged.length > 0) {
     const idx = gaps.findIndex((g) => /exact offering names/i.test(g));
-    if (idx >= 0) gaps.splice(idx, 1);
+
+    if (idx >= 0) {
+      gaps.splice(idx, 1);
+    }
   }
 
   return {
-    understandingSummary: base.understandingSummary,
-    chatbotReadinessSummary: base.chatbotReadinessSummary,
-    chatbotCanAnswer: base.chatbotCanAnswer,
+    understandingSummary:
+      base?.understandingSummary ?? "No understanding summary was generated.",
+
+    chatbotReadinessSummary:
+      base?.chatbotReadinessSummary ?? "Document analysis is incomplete.",
+
+    chatbotCanAnswer: base?.chatbotCanAnswer ?? [],
+
     gaps,
+
     suggestedOfferings: merged.map((o) => ({
       id: crypto.randomUUID(),
-      name: o.name.trim(),
-      description: o.description?.trim() ?? '',
-      documentExcerpt: o.documentExcerpt.trim(),
-      rationale: o.documentExcerpt.trim(),
-      status: 'pending',
-      source: analysisMode === 'openai' ? 'ai' : 'document',
+
+      name: o.name?.trim() ?? "",
+
+      description: o.description?.trim() ?? "",
+
+      documentExcerpt: o.documentExcerpt?.trim() ?? "",
+
+      rationale: o.documentExcerpt?.trim() ?? "",
+
+      status: "pending",
+
+      source:
+        analysisMode === "gemini" || analysisMode === "openai"
+          ? "ai"
+          : "document",
     })),
+
     analysisMode,
+
     analysisWarning,
   };
 }
 
-function formatOpenAiError(err) {
-  const msg = err?.message ?? String(err);
-  if (msg.includes('insufficient_quota') || msg.includes('429')) {
-    return 'OpenAI quota exceeded — add billing at platform.openai.com or use a key with credits. Showing basic fallback results.';
-  }
-  if (msg.includes('invalid_api_key') || msg.includes('401')) {
-    return 'Invalid OpenAI API key — check OPENAI_API_KEY in backend/.env';
-  }
-  if (msg.includes('timed out')) {
-    return 'OpenAI analysis timed out on a large document. Offering names were still extracted from the document structure where available.';
-  }
-  return `OpenAI analysis failed (${msg}). Showing basic fallback results.`;
-}
+/* ============================================================
+   OFFERING SECTION SUGGESTIONS
+   ============================================================ */
 
 /**
  * @param {Object} params
@@ -195,30 +470,72 @@ export async function generateOfferingSectionSuggestions({
   section,
   pendingDocumentRequirements,
 }) {
-  const fullDocText = await buildCombinedDocumentText(documents);
-  const priorRules = offering.eligibilityRules?.length
-    ? JSON.stringify(offering.eligibilityRules, null, 2)
-    : '(none yet)';
-  const priorDocs = offering.documentRequirements?.length
-    ? JSON.stringify(offering.documentRequirements, null, 2)
-    : '(none yet)';
+  let fullDocText = "";
 
-  if (!isOpenAiConfigured() || !fullDocText.trim()) {
-    if (section === 'eligibility' && fullDocText.trim()) {
-      const structured = extractEligibilityRulesFromText(fullDocText, offering.name);
-      return structured.length ? { eligibilityRules: structured } : null;
-    }
-    if (section === 'documents' && fullDocText.trim()) {
-      const structured = extractDocumentRequirementsFromText(fullDocText, offering.name);
-      return structured.length ? { documentRequirements: structured } : null;
-    }
-    if (section === 'queue' && fullDocText.trim()) {
-      return extractQueueSettingsFromText(fullDocText, offering.name);
-    }
+  try {
+    fullDocText = await buildCombinedDocumentText(documents);
+  } catch (err) {
+    logger.error(
+      {
+        error: err.message,
+        offering: offering?.name,
+        section,
+      },
+      "Failed to extract document text for offering",
+    );
+
     return null;
   }
 
-  const docText = focusDocumentForOffering(fullDocText, offering.name);
+  const safeDocText = typeof fullDocText === "string" ? fullDocText : "";
+
+  const priorRules = offering.eligibilityRules?.length
+    ? JSON.stringify(offering.eligibilityRules, null, 2)
+    : "(none yet)";
+
+  const priorDocs = offering.documentRequirements?.length
+    ? JSON.stringify(offering.documentRequirements, null, 2)
+    : "(none yet)";
+
+  /*
+   * If Gemini isn't configured or documents contain
+   * no extracted text, use structured extraction.
+   */
+  if (!isGeminiConfigured() || !safeDocText.trim()) {
+    if (section === "eligibility" && safeDocText.trim()) {
+      const structured = extractEligibilityRulesFromText(
+        safeDocText,
+        offering.name,
+      );
+
+      return structured.length
+        ? {
+            eligibilityRules: structured,
+          }
+        : null;
+    }
+
+    if (section === "documents" && safeDocText.trim()) {
+      const structured = extractDocumentRequirementsFromText(
+        safeDocText,
+        offering.name,
+      );
+
+      return structured.length
+        ? {
+            documentRequirements: structured,
+          }
+        : null;
+    }
+
+    if (section === "queue" && safeDocText.trim()) {
+      return extractQueueSettingsFromText(safeDocText, offering.name);
+    }
+
+    return null;
+  }
+
+  const docText = focusDocumentForOffering(safeDocText, offering.name);
 
   const baseContext = buildOfferingBaseContext({
     serviceName: service.name,
@@ -229,77 +546,123 @@ export async function generateOfferingSectionSuggestions({
   });
 
   try {
-    if (section === 'eligibility') {
-      const structured = extractEligibilityRulesFromText(fullDocText, offering.name);
+    /* ========================================================
+       ELIGIBILITY
+       ======================================================== */
+
+    if (section === "eligibility") {
+      const structured = extractEligibilityRulesFromText(
+        safeDocText,
+        offering.name,
+      );
+
       let aiRules = [];
+
       try {
-        const result = await chatJson({
+        const result = await geminiChatJson({
           system: OFFERING_ELIGIBILITY_SYSTEM_PROMPT,
+
           user: buildOfferingEligibilityUserPrompt({
             baseContext,
             priorRules,
             offeringName: offering.name,
           }),
+
           schema: offeringEligibilityResponseSchema,
-          timeoutMs: env.OPENAI_TIMEOUT_MS,
+
+          timeoutMs: env.GEMINI_TIMEOUT_MS ?? env.OPENAI_TIMEOUT_MS ?? 120000,
         });
+
         aiRules = result.eligibilityRules ?? [];
       } catch (eligibilityErr) {
         logger.warn(
-          { err: eligibilityErr.message, offering: offering.name },
-          'OpenAI eligibility extract failed; using structured document rules',
+          {
+            error: eligibilityErr.message,
+            offering: offering.name,
+          },
+          "Gemini eligibility extraction failed; using structured document rules",
         );
       }
-      const merged = mergeEligibilityRules(aiRules, structured);
-      return { eligibilityRules: merged };
+
+      return {
+        eligibilityRules: mergeEligibilityRules(aiRules, structured),
+      };
     }
 
-    if (section === 'documents') {
-      const structured = extractDocumentRequirementsFromText(fullDocText, offering.name);
+    /* ========================================================
+       DOCUMENTS
+       ======================================================== */
+
+    if (section === "documents") {
+      const structured = extractDocumentRequirementsFromText(
+        safeDocText,
+        offering.name,
+      );
+
       let aiDocs = [];
+
       try {
-        const result = await chatJson({
+        const result = await geminiChatJson({
           system: OFFERING_DOCUMENTS_SYSTEM_PROMPT,
+
           user: buildOfferingDocumentsUserPrompt({
             baseContext,
             priorDocs,
             priorRules,
             offeringName: offering.name,
           }),
+
           schema: offeringDocumentsResponseSchema,
-          timeoutMs: env.OPENAI_TIMEOUT_MS,
+
+          timeoutMs: env.GEMINI_TIMEOUT_MS ?? env.OPENAI_TIMEOUT_MS ?? 120000,
         });
+
         aiDocs = result.documentRequirements ?? [];
       } catch (documentsErr) {
         logger.warn(
-          { err: documentsErr.message, offering: offering.name },
-          'OpenAI documents extract failed; using structured document list',
+          {
+            error: documentsErr.message,
+            offering: offering.name,
+          },
+          "Gemini document extraction failed; using structured document list",
         );
       }
-      return { documentRequirements: mergeDocumentRequirements(aiDocs, structured) };
+
+      return {
+        documentRequirements: mergeDocumentRequirements(aiDocs, structured),
+      };
     }
 
-    if (section === 'workflow') {
+    /* ========================================================
+       WORKFLOW
+       ======================================================== */
+
+    if (section === "workflow") {
       const documentNames = [
         ...(offering.documentRequirements ?? []),
         ...(pendingDocumentRequirements ?? []),
       ]
         .map((d) => d.name)
         .filter(Boolean);
+
       const uniqueDocNames = [...new Set(documentNames)];
 
-      const skeletonResult = await chatJson({
+      const skeletonResult = await geminiChatJson({
         system: OFFERING_WORKFLOW_SKELETON_SYSTEM_PROMPT,
+
         user: buildOfferingWorkflowSkeletonUserPrompt({
           baseContext,
           priorRules,
           priorDocs,
           offeringName: offering.name,
         }),
+
         schema: offeringWorkflowSkeletonResponseSchema,
+
+        timeoutMs: env.GEMINI_TIMEOUT_MS ?? env.OPENAI_TIMEOUT_MS ?? 120000,
       });
 
-      let skeletonSteps = ensureAdmissionWorkflowSkeleton(
+      const skeletonSteps = ensureAdmissionWorkflowSkeleton(
         skeletonResult.workflowSteps ?? [],
         {
           offeringName: offering.name,
@@ -311,25 +674,19 @@ export async function generateOfferingSectionSuggestions({
       );
 
       if (!skeletonSteps.length) {
-        return { workflowSteps: [] };
-      }
-
-      if (skeletonSteps.length !== (skeletonResult.workflowSteps?.length ?? 0)) {
-        logger.info(
-          {
-            aiSteps: skeletonResult.workflowSteps?.length ?? 0,
-            finalSteps: skeletonSteps.length,
-          },
-          'Adjusted admission workflow skeleton',
-        );
+        return {
+          workflowSteps: [],
+        };
       }
 
       const skeletonJson = JSON.stringify(skeletonSteps, null, 2);
 
       let stepOutcomes = [];
+
       try {
-        const outcomesResult = await chatJson({
+        const outcomesResult = await geminiChatJson({
           system: OFFERING_WORKFLOW_OUTCOMES_SYSTEM_PROMPT,
+
           user: buildOfferingWorkflowOutcomesUserPrompt({
             baseContext,
             priorRules,
@@ -338,13 +695,20 @@ export async function generateOfferingSectionSuggestions({
             offeringName: offering.name,
             workflowSkeletonJson: skeletonJson,
           }),
+
           schema: offeringWorkflowOutcomesResponseSchema,
+
+          timeoutMs: env.GEMINI_TIMEOUT_MS ?? env.OPENAI_TIMEOUT_MS ?? 120000,
         });
+
         stepOutcomes = outcomesResult.stepOutcomes ?? [];
       } catch (outcomesErr) {
         logger.warn(
-          { err: outcomesErr.message, stepCount: skeletonSteps.length },
-          'Workflow outcomes phase failed — using canonical admission routing where applicable',
+          {
+            error: outcomesErr.message,
+            stepCount: skeletonSteps.length,
+          },
+          "Gemini workflow outcomes failed; using canonical admission routing",
         );
       }
 
@@ -356,58 +720,112 @@ export async function generateOfferingSectionSuggestions({
         offering.name,
       );
 
-      const missingOutcomes = alignedOutcomes.filter((e) => !e.outcomes?.length);
+      const missingOutcomes = alignedOutcomes.filter(
+        (entry) => !entry.outcomes?.length,
+      );
+
       if (missingOutcomes.length > 0) {
         const canonical = buildCanonicalAdmissionStepOutcomes(uniqueDocNames);
+
         alignedOutcomes = skeletonSteps.map((step) => {
           const entry = alignedOutcomes.find((e) => e.order === step.order);
-          if (entry?.outcomes?.length >= 3) return entry;
+
+          if (entry?.outcomes?.length >= 3) {
+            return entry;
+          }
+
           const fallback = canonical.find((c) => c.order === step.order);
-          return { order: step.order, outcomes: fallback?.outcomes ?? [] };
+
+          return {
+            order: step.order,
+
+            outcomes: fallback?.outcomes ?? [],
+          };
         });
       }
 
       return {
-        workflowSteps: mergeWorkflowSkeletonAndOutcomes(skeletonSteps, alignedOutcomes, {
-          documentNames: uniqueDocNames,
-        }),
+        workflowSteps: mergeWorkflowSkeletonAndOutcomes(
+          skeletonSteps,
+          alignedOutcomes,
+          {
+            documentNames: uniqueDocNames,
+          },
+        ),
       };
     }
 
-    if (section === 'queue') {
-      const structured = extractQueueSettingsFromText(fullDocText, offering.name);
+    /* ========================================================
+       QUEUE
+       ======================================================== */
+
+    if (section === "queue") {
+      const structured = extractQueueSettingsFromText(
+        safeDocText,
+        offering.name,
+      );
+
       let aiQueue = null;
+
       try {
-        const result = await chatJson({
+        const result = await geminiChatJson({
           system: OFFERING_QUEUE_SYSTEM_PROMPT,
-          user: buildOfferingQueueUserPrompt({ baseContext }),
+
+          user: buildOfferingQueueUserPrompt({
+            baseContext,
+          }),
+
           schema: offeringQueueResponseSchema,
-          timeoutMs: env.OPENAI_TIMEOUT_MS,
+
+          timeoutMs: env.GEMINI_TIMEOUT_MS ?? env.OPENAI_TIMEOUT_MS ?? 120000,
         });
+
         if (result.queueMode) {
           aiQueue = result;
         }
       } catch (queueErr) {
         logger.warn(
-          { err: queueErr.message, offering: offering.name },
-          'OpenAI queue extract failed; using structured queue settings',
+          {
+            error: queueErr.message,
+            offering: offering.name,
+          },
+          "Gemini queue extraction failed; using structured queue settings",
         );
       }
 
       const merged = aiQueue?.queueMode ? aiQueue : structured;
+
       if (!merged?.queueMode) {
-        return { queueMode: null };
+        return {
+          queueMode: null,
+        };
       }
 
-      // Attach payment hint in payload for admin (payment step is configured separately)
-      const payment = extractPaymentSettingsFromText(fullDocText, offering.name);
+      const payment = extractPaymentSettingsFromText(
+        safeDocText,
+        offering.name,
+      );
+
       return {
         ...merged,
-        ...(payment ? { paymentHint: payment } : {}),
+
+        ...(payment
+          ? {
+              paymentHint: payment,
+            }
+          : {}),
       };
     }
   } catch (err) {
-    logger.warn({ err: err.message, section }, 'OpenAI offering section failed');
+    logger.warn(
+      {
+        error: err.message,
+        section,
+        offering: offering?.name,
+      },
+      "Gemini offering section failed",
+    );
+
     return null;
   }
 

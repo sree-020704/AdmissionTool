@@ -1,96 +1,98 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, BookOpen, MapPin, Plus, Trash2 } from 'lucide-react';
-import { toast } from 'sonner';
-import { AdminLayout } from '@/components/layouts/AdminLayout';
-import { OfferingWizardNav, WIZARD_STEPS } from '@/components/offerings/OfferingWizardNav';
-import { ApplicantFieldBuilder } from '@/components/offerings/ApplicantFieldBuilder';
+import { useEffect, useMemo, useState } from "react";
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
+import { ArrowLeft, BookOpen, MapPin, Plus, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { AdminLayout } from "@/components/layouts/AdminLayout";
+import {
+  OfferingWizardNav,
+  WIZARD_STEPS,
+} from "@/components/offerings/OfferingWizardNav";
+import { ApplicantFieldBuilder } from "@/components/offerings/ApplicantFieldBuilder";
 import {
   IntakeDocumentConfig,
   intakeDocumentFromOffering,
   intakeDocumentToPayload,
-} from '@/components/offerings/IntakeDocumentConfig';
-import { AiStepAssist } from '@/components/offerings/AiStepAssist';
-import { WorkflowTimelineBuilder } from '@/components/offerings/WorkflowTimelineBuilder';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select } from '@/components/ui/select';
-import { DatePicker } from '@/components/ui/date-picker';
-import { TimePicker } from '@/components/ui/time-picker';
-import { FieldError } from '@/components/ui/field-error';
-import { Badge } from '@/components/ui/badge';
-import { OfferingConfigureSkeleton } from '@/components/skeletons';
-import { cn } from '@/lib/utils';
-import { offeringsApi } from '@/api/offerings.api';
-import { servicesApi } from '@/api/services.api';
-import { userApi } from '@/api/user.api';
-import { createStep, normalizeSteps, relinkStepOutcomes } from '@/utils/workflow';
-import { formatOfferingMissing } from '@/constants/offeringCompleteness.constants';
+} from "@/components/offerings/IntakeDocumentConfig";
+import { AiStepAssist } from "@/components/offerings/AiStepAssist";
+import { WorkflowTimelineBuilder } from "@/components/offerings/WorkflowTimelineBuilder";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
+import { DatePicker } from "@/components/ui/date-picker";
+import { TimePicker } from "@/components/ui/time-picker";
+import { FieldError } from "@/components/ui/field-error";
+import { Badge } from "@/components/ui/badge";
+import { OfferingConfigureSkeleton } from "@/components/skeletons";
+import { cn } from "@/lib/utils";
+import { offeringsApi } from "@/api/offerings.api";
+import { servicesApi } from "@/api/services.api";
+import { userApi } from "@/api/user.api";
+import {
+  createStep,
+  normalizeSteps,
+  relinkStepOutcomes,
+} from "@/utils/workflow";
+import { formatOfferingMissing } from "@/constants/offeringCompleteness.constants";
 import {
   normalizeOperatingHoursTime,
   validateOperatingHoursInput,
-} from '@/utils/operatingHours';
-import { validateOfferingDetails } from '@/utils/offeringDetails.validation';
+} from "@/utils/operatingHours";
+import { validateOfferingDetails } from "@/utils/offeringDetails.validation";
 
 const OPERATORS = [
-  { value: 'eq', label: '=' },
-  { value: 'neq', label: '≠' },
-  { value: 'gte', label: '≥' },
-  { value: 'lte', label: '≤' },
-  { value: 'gt', label: '>' },
-  { value: 'lt', label: '<' },
+  { value: "eq", label: "=" },
+  { value: "neq", label: "≠" },
+  { value: "gte", label: "≥" },
+  { value: "lte", label: "≤" },
+  { value: "gt", label: ">" },
+  { value: "lt", label: "<" },
 ];
 
 const FIELD_TYPES = [
-  { value: 'numeric', label: 'Numeric' },
-  { value: 'text', label: 'Text' },
-  { value: 'boolean', label: 'Boolean' },
+  { value: "numeric", label: "Numeric" },
+  { value: "text", label: "Text" },
+  { value: "boolean", label: "Boolean" },
 ];
 
 const STAFF_ROLES_FALLBACK = [
-  { value: 'document_verifier', label: 'Document Verifier' },
-  { value: 'approver', label: 'Approver' },
-  { value: 'counter_staff', label: 'Counter Staff' },
-  { value: 'general', label: 'General Staff' },
+  { value: "document_verifier", label: "Document Verifier" },
+  { value: "approver", label: "Approver" },
+  { value: "counter_staff", label: "Counter Staff" },
+  { value: "general", label: "General Staff" },
 ];
 
 const SECTION_LABELS = {
-  eligibility: 'eligibility rules',
-  documents: 'document requirements',
-  workflow: 'workflow steps',
-  queue: 'queue settings',
+  eligibility: "eligibility rules",
+  documents: "document requirements",
+  workflow: "workflow steps",
+  queue: "queue settings",
 };
 
-function sectionHasExtractedContent(suggestions, section) {
-  const payload = suggestions?.payload;
-  if (!payload) return false;
-  if (section === 'eligibility') return Boolean(payload.eligibilityRules?.length);
-  if (section === 'documents') return Boolean(payload.documentRequirements?.length);
-  if (section === 'workflow') return Boolean(payload.workflowSteps?.length);
-  if (section === 'queue') return Boolean(payload.queueMode);
-  return false;
-}
-
 function toDateInput(value) {
-  if (!value) return '';
-  // Use India calendar day — UTC slice() shifts dates back one day for IST midnights.
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date(value));
+  if (!value) return "";
+  return new Date(value).toISOString().slice(0, 10);
 }
 
-function toInstituteIsoDateTime(dateYmd, endOfDay = false) {
-  if (!dateYmd) return null;
-  const time = endOfDay ? 'T23:59:59.999+05:30' : 'T00:00:00.000+05:30';
-  return new Date(`${dateYmd}${time}`).toISOString();
-}
-
-function StepFooter({ onBack, onSaveDraft, onContinue, saving, continueLabel = 'Save & continue' }) {
+function StepFooter({
+  onBack,
+  onSaveDraft,
+  onContinue,
+  saving,
+  continueLabel = "Save & continue",
+}) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
       {onBack ? (
@@ -102,7 +104,12 @@ function StepFooter({ onBack, onSaveDraft, onContinue, saving, continueLabel = '
       )}
       <div className="flex flex-wrap gap-2">
         {onSaveDraft ? (
-          <Button type="button" variant="outline" onClick={onSaveDraft} disabled={saving}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onSaveDraft}
+            disabled={saving}
+          >
             Save draft
           </Button>
         ) : null}
@@ -118,7 +125,7 @@ export function OfferingConfigurePage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const step = searchParams.get('step') || 'details';
+  const step = searchParams.get("step") || "details";
 
   const [offering, setOffering] = useState(null);
   const [service, setService] = useState(null);
@@ -130,21 +137,45 @@ export function OfferingConfigurePage() {
   const [showDetailsValidation, setShowDetailsValidation] = useState(false);
 
   const [detailsForm, setDetailsForm] = useState({
-    name: '',
-    description: '',
-    startDate: '',
-    endDate: '',
+    name: "",
+    description: "",
+    startDate: "",
+    endDate: "",
   });
   const [applicantFields, setApplicantFields] = useState([]);
-  const [intakeDocument, setIntakeDocument] = useState(intakeDocumentFromOffering());
+  const [intakeDocument, setIntakeDocument] = useState(
+    intakeDocumentFromOffering(),
+  );
   const [visitDetails, setVisitDetails] = useState({
-    visitLocation: '',
-    visitInstructions: '',
+    visitLocation: "",
+    visitInstructions: "",
   });
-  const [rules, setRules] = useState([]);
-  const [docs, setDocs] = useState([]);
+  const [admissionType, setAdmissionType] = useState("REGULAR");
+  const [regularRules, setRegularRules] = useState([]);
+  const [transferRules, setTransferRules] = useState([]);
+  const [regularDocs, setRegularDocs] = useState([]);
+  const [transferDocs, setTransferDocs] = useState([]);
+
+  const rules = admissionType === "TRANSFER" ? transferRules : regularRules;
+  const docs = admissionType === "TRANSFER" ? transferDocs : regularDocs;
+
+  const setRules = (next) => {
+    if (admissionType === "TRANSFER") {
+      setTransferRules(typeof next === "function" ? next(transferRules) : next);
+    } else {
+      setRegularRules(typeof next === "function" ? next(regularRules) : next);
+    }
+  };
+
+  const setDocs = (next) => {
+    if (admissionType === "TRANSFER") {
+      setTransferDocs(typeof next === "function" ? next(transferDocs) : next);
+    } else {
+      setRegularDocs(typeof next === "function" ? next(regularDocs) : next);
+    }
+  };
   const [steps, setSteps] = useState([]);
-  const [queueMode, setQueueMode] = useState('queue_only');
+  const [queueMode, setQueueMode] = useState("queue_only");
   const [queueConfig, setQueueConfig] = useState({
     capacity: 50,
     processingRatePerHour: 10,
@@ -152,22 +183,22 @@ export function OfferingConfigurePage() {
   });
   const [paymentConfig, setPaymentConfig] = useState({
     enabled: false,
-    amount: '',
-    label: '',
-    timing: 'before_submit',
-    workflowStepId: '',
+    amount: "",
+    label: "",
+    timing: "before_submit",
+    workflowStepId: "",
   });
   const [appointmentConfig, setAppointmentConfig] = useState({
     slotDurationMinutes: 15,
     slotCapacity: 5,
-    operatingHoursStart: '09:00',
-    operatingHoursEnd: '17:00',
+    operatingHoursStart: "09:00",
+    operatingHoursEnd: "17:00",
     operatingDays: [1, 2, 3, 4, 5],
     bookingHorizonDays: 14,
     virtualAppointment: {
       enabled: false,
-      allowedProviders: ['google_meet', 'zoom'],
-      defaultProvider: 'google_meet',
+      allowedProviders: ["google_meet", "zoom"],
+      defaultProvider: "google_meet",
       autoGenerateLink: true,
       autoSendLinkOnConfirm: true,
       allowAdditionalRecipients: true,
@@ -189,7 +220,7 @@ export function OfferingConfigurePage() {
     if (next === step) return;
     if (dirtySteps[step]) {
       const shouldLeave = window.confirm(
-        'You have unsaved changes on this step. Leave without saving?',
+        "You have unsaved changes on this step. Leave without saving?",
       );
       if (!shouldLeave) return;
       clearDirty(step);
@@ -198,16 +229,16 @@ export function OfferingConfigurePage() {
   };
 
   const defaultRule = () => ({
-    field: 'Marks',
-    fieldType: 'numeric',
-    operator: 'gte',
+    field: "Marks",
+    fieldType: "numeric",
+    operator: "gte",
     value: 60,
   });
 
   const defaultDoc = () => ({
-    name: 'Government ID',
+    name: "Government ID",
     required: true,
-    allowedTypes: ['pdf', 'jpg', 'jpeg', 'png'],
+    allowedTypes: ["pdf", "jpg", "jpeg", "png"],
     maxSizeMb: 5,
   });
 
@@ -218,8 +249,8 @@ export function OfferingConfigurePage() {
     const o = data.data.offering;
     setOffering(o);
     setDetailsForm({
-      name: o.name ?? '',
-      description: o.description ?? '',
+      name: o.name ?? "",
+      description: o.description ?? "",
       startDate: toDateInput(o.startDate),
       endDate: toDateInput(o.endDate),
     });
@@ -227,18 +258,46 @@ export function OfferingConfigurePage() {
     setIntakeDocument(intakeDocumentFromOffering(o));
     setPaymentConfig({
       enabled: o.paymentConfig?.enabled ?? false,
-      amount: o.paymentConfig?.amount ?? '',
-      label: o.paymentConfig?.label ?? '',
-      timing: o.paymentConfig?.timing ?? 'before_submit',
-      workflowStepId: o.paymentConfig?.workflowStepId ?? '',
+      amount: o.paymentConfig?.amount ?? "",
+      label: o.paymentConfig?.label ?? "",
+      timing: o.paymentConfig?.timing ?? "before_submit",
+      workflowStepId: o.paymentConfig?.workflowStepId ?? "",
     });
     setVisitDetails({
-      visitLocation: o.visitLocation ?? '',
-      visitInstructions: o.visitInstructions ?? '',
+      visitLocation: o.visitLocation ?? "",
+      visitInstructions: o.visitInstructions ?? "",
     });
-    setRules(o.eligibilityRules?.length ? o.eligibilityRules : [defaultRule()]);
-    setDocs(o.documentRequirements?.length ? o.documentRequirements : [defaultDoc()]);
-    const wf = o.workflowSteps?.length ? normalizeSteps(o.workflowSteps) : defaultSteps();
+    const groupedRules = o.eligibilityByAdmissionType ?? {};
+    const groupedDocs = o.documentsByAdmissionType ?? {};
+
+    const loadedRegularRules = Array.isArray(groupedRules.regular)
+      ? groupedRules.regular
+      : (o.eligibilityRules ?? []);
+
+    const loadedTransferRules = Array.isArray(groupedRules.transfer)
+      ? groupedRules.transfer
+      : [];
+
+    const loadedRegularDocs = Array.isArray(groupedDocs.regular)
+      ? groupedDocs.regular
+      : (o.documentRequirements ?? []);
+
+    const loadedTransferDocs = Array.isArray(groupedDocs.transfer)
+      ? groupedDocs.transfer
+      : [];
+
+    setRegularRules(
+      loadedRegularRules.length ? loadedRegularRules : [defaultRule()],
+    );
+    setTransferRules(loadedTransferRules);
+    setRegularDocs(
+      loadedRegularDocs.length ? loadedRegularDocs : [defaultDoc()],
+    );
+    setTransferDocs(loadedTransferDocs);
+    setAdmissionType("REGULAR");
+    const wf = o.workflowSteps?.length
+      ? normalizeSteps(o.workflowSteps)
+      : defaultSteps();
     setSteps(relinkStepOutcomes(wf));
     if (o.queueMode) setQueueMode(o.queueMode);
     if (o.queueConfig) {
@@ -254,22 +313,32 @@ export function OfferingConfigurePage() {
         slotCapacity: o.appointmentConfig.slotCapacity ?? 5,
         operatingHoursStart: normalizeOperatingHoursTime(
           o.appointmentConfig.operatingHoursStart,
-          '09:00',
+          "09:00",
         ),
         operatingHoursEnd: normalizeOperatingHoursTime(
           o.appointmentConfig.operatingHoursEnd,
-          '17:00',
+          "17:00",
         ),
         operatingDays: o.appointmentConfig.operatingDays ?? [1, 2, 3, 4, 5],
         bookingHorizonDays: o.appointmentConfig.bookingHorizonDays ?? 14,
         virtualAppointment: {
           enabled: o.appointmentConfig.virtualAppointment?.enabled ?? false,
-          allowedProviders: o.appointmentConfig.virtualAppointment?.allowedProviders ?? ['google_meet', 'zoom'],
-          defaultProvider: o.appointmentConfig.virtualAppointment?.defaultProvider ?? 'google_meet',
-          autoGenerateLink: o.appointmentConfig.virtualAppointment?.autoGenerateLink ?? true,
-          autoSendLinkOnConfirm: o.appointmentConfig.virtualAppointment?.autoSendLinkOnConfirm ?? true,
-          allowAdditionalRecipients: o.appointmentConfig.virtualAppointment?.allowAdditionalRecipients ?? true,
-          maxAdditionalRecipients: o.appointmentConfig.virtualAppointment?.maxAdditionalRecipients ?? 50,
+          allowedProviders: o.appointmentConfig.virtualAppointment
+            ?.allowedProviders ?? ["google_meet", "zoom"],
+          defaultProvider:
+            o.appointmentConfig.virtualAppointment?.defaultProvider ??
+            "google_meet",
+          autoGenerateLink:
+            o.appointmentConfig.virtualAppointment?.autoGenerateLink ?? true,
+          autoSendLinkOnConfirm:
+            o.appointmentConfig.virtualAppointment?.autoSendLinkOnConfirm ??
+            true,
+          allowAdditionalRecipients:
+            o.appointmentConfig.virtualAppointment?.allowAdditionalRecipients ??
+            true,
+          maxAdditionalRecipients:
+            o.appointmentConfig.virtualAppointment?.maxAdditionalRecipients ??
+            50,
         },
       });
     }
@@ -297,30 +366,30 @@ export function OfferingConfigurePage() {
     setGeneratingSection(section);
     try {
       const { data } = await offeringsApi.generateAi(id, { section });
-      const suggestions = data.data.suggestions;
-      setAiSuggestions(suggestions);
-      const label = SECTION_LABELS[section];
-
-      if (!suggestions?.sourceDocumentCount) {
-        toast.warning('Upload knowledge documents on the service first, then extract again.');
-        return;
-      }
-
-      if (!sectionHasExtractedContent(suggestions, section)) {
-        toast.warning(
-          `Nothing could be extracted for ${label} from the uploaded documents. Add them below manually, or upload a document that states them clearly.`,
-        );
-        return;
-      }
-
-      await offeringsApi.applyAi(id, { section });
-      await loadOffering();
-      toast.success(`${label.charAt(0).toUpperCase()}${label.slice(1)} have been populated below.`);
+      setAiSuggestions(data.data.suggestions);
+      toast.success(data.message);
     } catch (err) {
-      toast.error(err.message || 'Could not extract from documents');
+      toast.error(err.message || "Could not generate suggestions");
     } finally {
       setGeneratingSection(null);
     }
+  };
+
+  const applyAiSection = async (section) => {
+    try {
+      const { data } = await offeringsApi.applyAi(id, { section });
+      setOffering(data.data.offering);
+      await loadOffering();
+      toast.success("Suggestions applied");
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
+
+  const dismissAi = async () => {
+    await offeringsApi.rejectAi(id);
+    setAiSuggestions(null);
+    toast.success("Suggestions dismissed");
   };
 
   const saveDetails = async ({ advance = false } = {}) => {
@@ -335,7 +404,7 @@ export function OfferingConfigurePage() {
     });
 
     if (!validation.valid) {
-      toast.error('Fix the highlighted issues before saving');
+      toast.error("Fix the highlighted issues before saving");
       return false;
     }
 
@@ -344,8 +413,12 @@ export function OfferingConfigurePage() {
       const { data } = await offeringsApi.updateDetails(id, {
         name: detailsForm.name.trim(),
         description: detailsForm.description.trim(),
-        startDate: toInstituteIsoDateTime(detailsForm.startDate, false),
-        endDate: toInstituteIsoDateTime(detailsForm.endDate, true),
+        startDate: detailsForm.startDate
+          ? new Date(`${detailsForm.startDate}T00:00:00`).toISOString()
+          : null,
+        endDate: detailsForm.endDate
+          ? new Date(`${detailsForm.endDate}T23:59:59`).toISOString()
+          : null,
         applicantFields: applicantFields.map((field, index) => ({
           ...field,
           label: field.label.trim(),
@@ -354,10 +427,10 @@ export function OfferingConfigurePage() {
         intakeDocument: intakeDocumentToPayload(intakeDocument),
       });
       setOffering(data.data.offering);
-      clearDirty('details');
+      clearDirty("details");
       setShowDetailsValidation(false);
-      toast.success('Offering details saved');
-      if (advance) goToStep('eligibility');
+      toast.success("Offering details saved");
+      if (advance) goToStep("eligibility");
       return true;
     } catch (err) {
       toast.error(err.message);
@@ -370,11 +443,15 @@ export function OfferingConfigurePage() {
   const saveEligibility = async ({ advance = false } = {}) => {
     setSaving(true);
     try {
-      const { data } = await offeringsApi.updateEligibility(id, rules);
+      const { data } = await offeringsApi.updateEligibility(
+        id,
+        admissionType,
+        rules,
+      );
       setOffering(data.data.offering);
-      clearDirty('eligibility');
-      toast.success('Eligibility rules saved');
-      if (advance) goToStep('documents');
+      clearDirty("eligibility");
+      toast.success("Eligibility rules saved");
+      if (advance) goToStep("documents");
       return true;
     } catch (err) {
       toast.error(err.message);
@@ -387,11 +464,15 @@ export function OfferingConfigurePage() {
   const saveDocuments = async ({ advance = false } = {}) => {
     setSaving(true);
     try {
-      const { data } = await offeringsApi.updateDocuments(id, docs);
+      const { data } = await offeringsApi.updateDocuments(
+        id,
+        admissionType,
+        docs,
+      );
       setOffering(data.data.offering);
-      clearDirty('documents');
-      toast.success('Document requirements saved');
-      if (advance) goToStep('workflow');
+      clearDirty("documents");
+      toast.success("Document requirements saved");
+      if (advance) goToStep("workflow");
       return true;
     } catch (err) {
       toast.error(err.message);
@@ -406,9 +487,9 @@ export function OfferingConfigurePage() {
     try {
       const { data } = await offeringsApi.updateWorkflow(id, steps);
       setOffering(data.data.offering);
-      clearDirty('workflow');
-      toast.success('Workflow saved');
-      if (advance) goToStep('queue');
+      clearDirty("workflow");
+      toast.success("Workflow saved");
+      if (advance) goToStep("queue");
       return true;
     } catch (err) {
       toast.error(err.message);
@@ -421,15 +502,18 @@ export function OfferingConfigurePage() {
   const savePayment = async ({ advance = false } = {}) => {
     if (paymentConfig.enabled) {
       if (!paymentConfig.label?.trim()) {
-        toast.error('Enter a fee label (e.g. Admission fee)');
+        toast.error("Enter a fee label (e.g. Admission fee)");
         return false;
       }
       if (!paymentConfig.amount || Number(paymentConfig.amount) < 1) {
-        toast.error('Enter a valid fee amount');
+        toast.error("Enter a valid fee amount");
         return false;
       }
-      if (paymentConfig.timing === 'workflow_step' && !paymentConfig.workflowStepId) {
-        toast.error('Select the workflow step where payment is collected');
+      if (
+        paymentConfig.timing === "workflow_step" &&
+        !paymentConfig.workflowStepId
+      ) {
+        toast.error("Select the workflow step where payment is collected");
         return false;
       }
     }
@@ -440,11 +524,11 @@ export function OfferingConfigurePage() {
         ? {
             enabled: true,
             amount: Number(paymentConfig.amount),
-            currency: 'INR',
+            currency: "INR",
             label: paymentConfig.label.trim(),
             timing: paymentConfig.timing,
             workflowStepId:
-              paymentConfig.timing === 'workflow_step'
+              paymentConfig.timing === "workflow_step"
                 ? paymentConfig.workflowStepId || null
                 : null,
           }
@@ -454,14 +538,14 @@ export function OfferingConfigurePage() {
       setOffering(data.data.offering);
       setPaymentConfig({
         enabled: data.data.offering.paymentConfig?.enabled ?? false,
-        amount: data.data.offering.paymentConfig?.amount ?? '',
-        label: data.data.offering.paymentConfig?.label ?? '',
-        timing: data.data.offering.paymentConfig?.timing ?? 'before_submit',
-        workflowStepId: data.data.offering.paymentConfig?.workflowStepId ?? '',
+        amount: data.data.offering.paymentConfig?.amount ?? "",
+        label: data.data.offering.paymentConfig?.label ?? "",
+        timing: data.data.offering.paymentConfig?.timing ?? "before_submit",
+        workflowStepId: data.data.offering.paymentConfig?.workflowStepId ?? "",
       });
-      clearDirty('payment');
-      toast.success('Payment settings saved');
-      if (advance) goToStep('review');
+      clearDirty("payment");
+      toast.success("Payment settings saved");
+      if (advance) goToStep("review");
       return true;
     } catch (err) {
       toast.error(err.message);
@@ -472,7 +556,8 @@ export function OfferingConfigurePage() {
   };
 
   const saveQueue = async ({ advance = false } = {}) => {
-    const needsAppointment = queueMode === 'appointment_only' || queueMode === 'hybrid';
+    const needsAppointment =
+      queueMode === "appointment_only" || queueMode === "hybrid";
     let normalizedAppointment = appointmentConfig;
 
     if (needsAppointment) {
@@ -494,7 +579,7 @@ export function OfferingConfigurePage() {
     setSaving(true);
     try {
       const payload = { queueMode };
-      if (queueMode === 'queue_only' || queueMode === 'hybrid') {
+      if (queueMode === "queue_only" || queueMode === "hybrid") {
         payload.queueConfig = queueConfig;
       }
       if (needsAppointment) {
@@ -507,9 +592,9 @@ export function OfferingConfigurePage() {
       await offeringsApi.updateQueue(id, payload);
       const refreshed = await offeringsApi.get(id);
       setOffering(refreshed.data.data.offering);
-      clearDirty('queue');
-      toast.success('Queue configuration saved');
-      if (advance) goToStep('payment');
+      clearDirty("queue");
+      toast.success("Queue configuration saved");
+      if (advance) goToStep("payment");
       return true;
     } catch (err) {
       toast.error(err.message);
@@ -523,10 +608,12 @@ export function OfferingConfigurePage() {
     try {
       const { data } = await offeringsApi.activate(id);
       setOffering(data.data.offering);
-      toast.success('Offering is now active');
-      navigate('/admin/services');
+      toast.success("Offering is now active");
+      navigate(`/admin/services/${offering.serviceId}`);
     } catch (err) {
-      toast.error(err.message || 'Cannot activate — complete all configuration');
+      toast.error(
+        err.message || "Cannot activate — complete all configuration",
+      );
     }
   };
 
@@ -567,9 +654,9 @@ export function OfferingConfigurePage() {
   const insights = service?.knowledgeInsights;
   const canUseAi = Boolean(
     insights?.understandingSummary ||
-      insights?.chatbotReadinessSummary ||
-      insights?.chatbotCanAnswer?.length ||
-      insights?.generatedAt,
+    insights?.chatbotReadinessSummary ||
+    insights?.chatbotCanAnswer?.length ||
+    insights?.generatedAt,
   );
   const appointmentHoursPreview = validateOperatingHoursInput(
     appointmentConfig.operatingHoursStart,
@@ -580,40 +667,49 @@ export function OfferingConfigurePage() {
     <AdminLayout>
       <div className="mx-auto max-w-4xl px-6 py-8">
         <Link
-          to="/admin/services"
+          to={`/admin/services/${offering.serviceId}`}
           className="mb-4 inline-flex items-center gap-1 text-sm text-muted hover:text-foreground"
         >
           <ArrowLeft className="h-4 w-4" />
-          Back to services
+          Back to {service?.name ?? "service"}
         </Link>
 
         <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-semibold">{detailsForm.name || offering.name}</h1>
-            <p className="text-sm text-muted">Configure offering · {service?.name}</p>
+            <h1 className="text-2xl font-semibold">
+              {detailsForm.name || offering.name}
+            </h1>
+            <p className="text-sm text-muted">
+              Configure offering · {service?.name}
+            </p>
           </div>
           <Badge variant={offering.status}>{offering.status}</Badge>
         </div>
 
         {dirtySteps[step] ? (
           <p className="mb-4 rounded-xl border border-[#F5DEC2] bg-[#FDFAF6] px-4 py-3 text-sm text-[#7A6040]">
-            You have unsaved changes on this step. Use <strong>Save draft</strong> or{' '}
-            <strong>Save &amp; continue</strong> before leaving, or click another step to discard
-            changes.
+            You have unsaved changes on this step. Use{" "}
+            <strong>Save draft</strong> or <strong>Save &amp; continue</strong>{" "}
+            before leaving, or click another step to discard changes.
           </p>
         ) : null}
 
-        {(insights?.chatbotReadinessSummary || insights?.understandingSummary) && (
+        {(insights?.chatbotReadinessSummary ||
+          insights?.understandingSummary) && (
           <div className="mb-6 flex gap-3 rounded-xl border border-sage/30 bg-sage/5 p-4 text-sm">
             <BookOpen className="h-5 w-5 shrink-0 text-sage" />
             <div>
-              <p className="font-medium text-forest">From service knowledge documents</p>
+              <p className="font-medium text-forest">
+                From service knowledge documents
+              </p>
               <p className="mt-1 text-muted text-xs line-clamp-3">
-                {insights.chatbotReadinessSummary ?? insights.understandingSummary}
+                {insights.chatbotReadinessSummary ??
+                  insights.understandingSummary}
               </p>
               {!canUseAi && (
                 <p className="mt-2 text-xs text-warning">
-                  Generate insights on the service page for richer AI suggestions.
+                  Generate insights on the service page for richer AI
+                  suggestions.
                 </p>
               )}
             </div>
@@ -626,13 +722,14 @@ export function OfferingConfigurePage() {
           onStepClick={navigateToStep}
         />
 
-        {step === 'details' && (
+        {step === "details" && (
           <Card>
             <CardHeader>
               <CardTitle>Offering details</CardTitle>
               <CardDescription>
-                Programme information students see before applying, plus the personal details form
-                they fill in (date of birth, address, phone, etc.).
+                Programme information students see before applying, plus the
+                personal details form they fill in (date of birth, address,
+                phone, etc.).
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -643,7 +740,9 @@ export function OfferingConfigurePage() {
               ) : null}
 
               <section className="rounded-xl border border-border bg-[#FAFBFA] p-5">
-                <h3 className="text-sm font-semibold text-forest">Programme information</h3>
+                <h3 className="text-sm font-semibold text-forest">
+                  Programme information
+                </h3>
                 <p className="mt-1 text-xs text-muted">
                   Name, description, and when students can apply.
                 </p>
@@ -654,10 +753,15 @@ export function OfferingConfigurePage() {
                     <Input
                       id="offering-name"
                       value={detailsForm.name}
-                      className={detailsErrors.name ? 'border-destructive/60' : undefined}
+                      className={
+                        detailsErrors.name ? "border-destructive/60" : undefined
+                      }
                       onChange={(event) => {
-                        markDirty('details');
-                        setDetailsForm({ ...detailsForm, name: event.target.value });
+                        markDirty("details");
+                        setDetailsForm({
+                          ...detailsForm,
+                          name: event.target.value,
+                        });
                       }}
                     />
                     <FieldError message={detailsErrors.name} />
@@ -670,12 +774,17 @@ export function OfferingConfigurePage() {
                       rows={3}
                       value={detailsForm.description}
                       onChange={(event) => {
-                        markDirty('details');
-                        setDetailsForm({ ...detailsForm, description: event.target.value });
+                        markDirty("details");
+                        setDetailsForm({
+                          ...detailsForm,
+                          description: event.target.value,
+                        });
                       }}
                       className={cn(
-                        'flex min-h-[88px] w-full rounded-lg border bg-surface px-3 py-2 text-sm placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20',
-                        detailsErrors.description ? 'border-destructive/60' : 'border-border',
+                        "flex min-h-[88px] w-full rounded-lg border bg-surface px-3 py-2 text-sm placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20",
+                        detailsErrors.description
+                          ? "border-destructive/60"
+                          : "border-border",
                       )}
                       placeholder="What this programme covers and who it is for."
                     />
@@ -696,8 +805,11 @@ export function OfferingConfigurePage() {
                         maxDate={detailsForm.endDate || undefined}
                         error={Boolean(detailsErrors.startDate)}
                         onChange={(nextValue) => {
-                          markDirty('details');
-                          setDetailsForm({ ...detailsForm, startDate: nextValue });
+                          markDirty("details");
+                          setDetailsForm({
+                            ...detailsForm,
+                            startDate: nextValue,
+                          });
                         }}
                         placeholder="Select opening date"
                       />
@@ -711,8 +823,11 @@ export function OfferingConfigurePage() {
                         minDate={detailsForm.startDate || undefined}
                         error={Boolean(detailsErrors.endDate)}
                         onChange={(nextValue) => {
-                          markDirty('details');
-                          setDetailsForm({ ...detailsForm, endDate: nextValue });
+                          markDirty("details");
+                          setDetailsForm({
+                            ...detailsForm,
+                            endDate: nextValue,
+                          });
                         }}
                         placeholder="Select closing date"
                       />
@@ -723,17 +838,23 @@ export function OfferingConfigurePage() {
               </section>
 
               <section className="rounded-xl border border-border bg-[#FAFBFA] p-5">
-                <h3 className="text-sm font-semibold text-forest">Identification document at intake</h3>
+                <h3 className="text-sm font-semibold text-forest">
+                  Identification document at intake
+                </h3>
                 <p className="mt-1 text-xs text-muted">
-                  Students upload this when they click Start application so your team can verify them
-                  before authorization.
+                  Students upload this when they click Start application so your
+                  team can verify them before authorization.
                 </p>
                 <div className="mt-4">
                   <IntakeDocumentConfig
                     value={intakeDocument}
-                    error={showDetailsValidation ? detailsValidation.errors.intakeDocument : undefined}
+                    error={
+                      showDetailsValidation
+                        ? detailsValidation.errors.intakeDocument
+                        : undefined
+                    }
                     onChange={(nextConfig) => {
-                      markDirty('details');
+                      markDirty("details");
                       setIntakeDocument(nextConfig);
                     }}
                   />
@@ -741,16 +862,19 @@ export function OfferingConfigurePage() {
               </section>
 
               <section className="rounded-xl border border-border bg-[#FAFBFA] p-5">
-                <h3 className="text-sm font-semibold text-forest">Applicant personal details</h3>
+                <h3 className="text-sm font-semibold text-forest">
+                  Applicant personal details
+                </h3>
                 <p className="mt-1 text-xs text-muted">
-                  Custom input fields students complete when starting their application.
+                  Custom input fields students complete when starting their
+                  application.
                 </p>
                 <div className="mt-4">
                   <ApplicantFieldBuilder
                     fields={applicantFields}
                     fieldErrors={detailsErrors.applicantFields}
                     onChange={(nextFields) => {
-                      markDirty('details');
+                      markDirty("details");
                       setApplicantFields(nextFields);
                     }}
                   />
@@ -766,21 +890,55 @@ export function OfferingConfigurePage() {
           </Card>
         )}
 
-        {step === 'eligibility' && (
+        {step === "eligibility" && (
           <Card>
             <CardHeader>
               <CardTitle>Eligibility rules</CardTitle>
               <CardDescription>
-                All rules use AND logic. Use &ldquo;Extract from documents&rdquo; to pull exact
-                criteria stated in your uploads.
+                All rules use AND logic. Use &ldquo;Extract from
+                documents&rdquo; to pull exact criteria stated in your uploads.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div className="rounded-xl border border-border bg-[#FAFBFA] p-4">
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant={
+                      admissionType === "REGULAR" ? "default" : "outline"
+                    }
+                    onClick={() => setAdmissionType("REGULAR")}
+                  >
+                    Regular Admission
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={
+                      admissionType === "TRANSFER" ? "default" : "outline"
+                    }
+                    onClick={() => setAdmissionType("TRANSFER")}
+                  >
+                    Transfer Admission
+                  </Button>
+                </div>
+                <p className="mt-2 text-xs text-muted">
+                  Editing{" "}
+                  <strong>
+                    {admissionType === "TRANSFER"
+                      ? "Transfer Admission"
+                      : "Regular Admission"}
+                  </strong>{" "}
+                  eligibility rules only.
+                </p>
+              </div>
               <AiStepAssist
                 section="eligibility"
+                sectionLabel={SECTION_LABELS.eligibility}
                 aiSuggestions={aiSuggestions}
-                generating={generatingSection === 'eligibility'}
+                generating={generatingSection === "eligibility"}
                 onGenerate={handleGenerateAi}
+                onApply={applyAiSection}
+                onDismiss={dismissAi}
                 canGenerate={canUseAi}
               />
 
@@ -801,7 +959,7 @@ export function OfferingConfigurePage() {
                     placeholder="Field name"
                     value={rule.field}
                     onChange={(e) => {
-                      markDirty('eligibility');
+                      markDirty("eligibility");
                       const next = [...rules];
                       next[i].field = e.target.value;
                       setRules(next);
@@ -810,7 +968,7 @@ export function OfferingConfigurePage() {
                   <Select
                     value={rule.fieldType}
                     onChange={(nextValue) => {
-                      markDirty('eligibility');
+                      markDirty("eligibility");
                       const next = [...rules];
                       next[i].fieldType = nextValue;
                       setRules(next);
@@ -823,7 +981,7 @@ export function OfferingConfigurePage() {
                   <Select
                     value={rule.operator}
                     onChange={(nextValue) => {
-                      markDirty('eligibility');
+                      markDirty("eligibility");
                       const next = [...rules];
                       next[i].operator = nextValue;
                       setRules(next);
@@ -838,11 +996,11 @@ export function OfferingConfigurePage() {
                       placeholder="Value"
                       value={String(rule.value)}
                       onChange={(e) => {
-                        markDirty('eligibility');
+                        markDirty("eligibility");
                         const next = [...rules];
                         let val = e.target.value;
-                        if (rule.fieldType === 'numeric') val = Number(val);
-                        if (rule.fieldType === 'boolean') val = val === 'true';
+                        if (rule.fieldType === "numeric") val = Number(val);
+                        if (rule.fieldType === "boolean") val = val === "true";
                         next[i].value = val;
                         setRules(next);
                       }}
@@ -851,7 +1009,7 @@ export function OfferingConfigurePage() {
                       variant="ghost"
                       size="sm"
                       onClick={() => {
-                        markDirty('eligibility');
+                        markDirty("eligibility");
                         setRules(rules.filter((_, idx) => idx !== i));
                       }}
                     >
@@ -863,7 +1021,7 @@ export function OfferingConfigurePage() {
               <Button
                 variant="outline"
                 onClick={() => {
-                  markDirty('eligibility');
+                  markDirty("eligibility");
                   setRules([...rules, defaultRule()]);
                 }}
               >
@@ -872,7 +1030,7 @@ export function OfferingConfigurePage() {
               </Button>
               <StepFooter
                 saving={saving}
-                onBack={() => navigateToStep('details')}
+                onBack={() => navigateToStep("details")}
                 onSaveDraft={() => saveEligibility()}
                 onContinue={() => saveEligibility({ advance: true })}
               />
@@ -880,27 +1038,66 @@ export function OfferingConfigurePage() {
           </Card>
         )}
 
-        {step === 'documents' && (
+        {step === "documents" && (
           <Card>
             <CardHeader>
               <CardTitle>Document requirements</CardTitle>
-              <CardDescription>Defines what students must upload before workflow steps run.</CardDescription>
+              <CardDescription>
+                Defines what students must upload before workflow steps run.
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div className="rounded-xl border border-border bg-[#FAFBFA] p-4">
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant={
+                      admissionType === "REGULAR" ? "default" : "outline"
+                    }
+                    onClick={() => setAdmissionType("REGULAR")}
+                  >
+                    Regular Admission
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={
+                      admissionType === "TRANSFER" ? "default" : "outline"
+                    }
+                    onClick={() => setAdmissionType("TRANSFER")}
+                  >
+                    Transfer Admission
+                  </Button>
+                </div>
+                <p className="mt-2 text-xs text-muted">
+                  Editing{" "}
+                  <strong>
+                    {admissionType === "TRANSFER"
+                      ? "Transfer Admission"
+                      : "Regular Admission"}
+                  </strong>{" "}
+                  document requirements only.
+                </p>
+              </div>
               <AiStepAssist
                 section="documents"
+                sectionLabel={SECTION_LABELS.documents}
                 aiSuggestions={aiSuggestions}
-                generating={generatingSection === 'documents'}
+                generating={generatingSection === "documents"}
                 onGenerate={handleGenerateAi}
+                onApply={applyAiSection}
+                onDismiss={dismissAi}
                 canGenerate={canUseAi}
               />
               {docs.map((doc, i) => (
-                <div key={i} className="grid gap-3 rounded-xl border border-border p-4 sm:grid-cols-2">
+                <div
+                  key={i}
+                  className="grid gap-3 rounded-xl border border-border p-4 sm:grid-cols-2"
+                >
                   <Input
                     placeholder="Document name"
                     value={doc.name}
                     onChange={(e) => {
-                      markDirty('documents');
+                      markDirty("documents");
                       const next = [...docs];
                       next[i].name = e.target.value;
                       setDocs(next);
@@ -912,7 +1109,7 @@ export function OfferingConfigurePage() {
                         type="checkbox"
                         checked={doc.required}
                         onChange={(e) => {
-                          markDirty('documents');
+                          markDirty("documents");
                           const next = [...docs];
                           next[i].required = e.target.checked;
                           setDocs(next);
@@ -925,7 +1122,7 @@ export function OfferingConfigurePage() {
                       className="w-24"
                       value={doc.maxSizeMb}
                       onChange={(e) => {
-                        markDirty('documents');
+                        markDirty("documents");
                         const next = [...docs];
                         next[i].maxSizeMb = Number(e.target.value);
                         setDocs(next);
@@ -938,7 +1135,7 @@ export function OfferingConfigurePage() {
               <Button
                 variant="outline"
                 onClick={() => {
-                  markDirty('documents');
+                  markDirty("documents");
                   setDocs([...docs, defaultDoc()]);
                 }}
               >
@@ -947,7 +1144,7 @@ export function OfferingConfigurePage() {
               </Button>
               <StepFooter
                 saving={saving}
-                onBack={() => navigateToStep('eligibility')}
+                onBack={() => navigateToStep("eligibility")}
                 onSaveDraft={() => saveDocuments()}
                 onContinue={() => saveDocuments({ advance: true })}
               />
@@ -955,26 +1152,30 @@ export function OfferingConfigurePage() {
           </Card>
         )}
 
-        {step === 'workflow' && (
+        {step === "workflow" && (
           <Card>
             <CardHeader>
               <CardTitle>Workflow timeline</CardTitle>
               <CardDescription>
-                Build a vertical timeline with staff, student, or AI handlers and outcome-based routing.
+                Build a vertical timeline with staff, student, or AI handlers
+                and outcome-based routing.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <AiStepAssist
                 section="workflow"
+                sectionLabel={SECTION_LABELS.workflow}
                 aiSuggestions={aiSuggestions}
-                generating={generatingSection === 'workflow'}
+                generating={generatingSection === "workflow"}
                 onGenerate={handleGenerateAi}
+                onApply={applyAiSection}
+                onDismiss={dismissAi}
                 canGenerate={canUseAi}
               />
               <WorkflowTimelineBuilder
                 steps={steps}
                 onChange={(nextSteps) => {
-                  markDirty('workflow');
+                  markDirty("workflow");
                   setSteps(nextSteps);
                 }}
                 staffRoles={staffRoles}
@@ -982,7 +1183,7 @@ export function OfferingConfigurePage() {
               />
               <StepFooter
                 saving={saving}
-                onBack={() => navigateToStep('documents')}
+                onBack={() => navigateToStep("documents")}
                 onSaveDraft={() => saveWorkflow()}
                 onContinue={() => saveWorkflow({ advance: true })}
               />
@@ -990,20 +1191,24 @@ export function OfferingConfigurePage() {
           </Card>
         )}
 
-        {step === 'queue' && (
+        {step === "queue" && (
           <Card>
             <CardHeader>
               <CardTitle>Queue & appointment</CardTitle>
               <CardDescription>
-                Configure walk-in queue capacity and appointment windows students can book.
+                Configure walk-in queue capacity and appointment windows
+                students can book.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <AiStepAssist
                 section="queue"
+                sectionLabel={SECTION_LABELS.queue}
                 aiSuggestions={aiSuggestions}
-                generating={generatingSection === 'queue'}
+                generating={generatingSection === "queue"}
                 onGenerate={handleGenerateAi}
+                onApply={applyAiSection}
+                onDismiss={dismissAi}
                 canGenerate={canUseAi}
               />
               <div className="space-y-2">
@@ -1011,19 +1216,21 @@ export function OfferingConfigurePage() {
                 <Select
                   value={queueMode}
                   onChange={(value) => {
-                    markDirty('queue');
+                    markDirty("queue");
                     setQueueMode(value);
                   }}
                   options={[
-                    { value: 'queue_only', label: 'Queue only' },
-                    { value: 'appointment_only', label: 'Appointment only' },
-                    { value: 'hybrid', label: 'Hybrid (queue + appointment)' },
+                    { value: "queue_only", label: "Queue only" },
+                    { value: "appointment_only", label: "Appointment only" },
+                    { value: "hybrid", label: "Hybrid (queue + appointment)" },
                   ]}
                 />
               </div>
-              {(queueMode === 'queue_only' || queueMode === 'hybrid') && (
+              {(queueMode === "queue_only" || queueMode === "hybrid") && (
                 <div className="rounded-xl border border-border bg-[#FAFBFA] p-4">
-                  <p className="text-sm font-semibold text-forest">Walk-in queue</p>
+                  <p className="text-sm font-semibold text-forest">
+                    Walk-in queue
+                  </p>
                   <div className="mt-3 grid gap-3 sm:grid-cols-2">
                     <div className="space-y-2">
                       <Label>Queue capacity</Label>
@@ -1031,8 +1238,11 @@ export function OfferingConfigurePage() {
                         type="number"
                         value={queueConfig.capacity}
                         onChange={(e) => {
-                          markDirty('queue');
-                          setQueueConfig({ ...queueConfig, capacity: Number(e.target.value) });
+                          markDirty("queue");
+                          setQueueConfig({
+                            ...queueConfig,
+                            capacity: Number(e.target.value),
+                          });
                         }}
                       />
                     </div>
@@ -1042,7 +1252,7 @@ export function OfferingConfigurePage() {
                         type="number"
                         value={queueConfig.processingRatePerHour}
                         onChange={(e) => {
-                          markDirty('queue');
+                          markDirty("queue");
                           setQueueConfig({
                             ...queueConfig,
                             processingRatePerHour: Number(e.target.value),
@@ -1054,16 +1264,23 @@ export function OfferingConfigurePage() {
                   <div className="mt-4 space-y-2">
                     <Label>Service counters</Label>
                     <p className="text-xs text-muted">
-                      Staff assign students to a counter when calling them. Used for wait-time estimates.
+                      Staff assign students to a counter when calling them. Used
+                      for wait-time estimates.
                     </p>
                     {(queueConfig.counters ?? []).map((counter, index) => (
-                      <div key={counter.id ?? index} className="flex flex-wrap items-center gap-2">
+                      <div
+                        key={counter.id ?? index}
+                        className="flex flex-wrap items-center gap-2"
+                      >
                         <Input
                           value={counter.label}
                           onChange={(e) => {
-                            markDirty('queue');
+                            markDirty("queue");
                             const next = [...(queueConfig.counters ?? [])];
-                            next[index] = { ...next[index], label: e.target.value };
+                            next[index] = {
+                              ...next[index],
+                              label: e.target.value,
+                            };
                             setQueueConfig({ ...queueConfig, counters: next });
                           }}
                           placeholder="Counter name"
@@ -1074,10 +1291,16 @@ export function OfferingConfigurePage() {
                             type="checkbox"
                             checked={counter.active !== false}
                             onChange={(e) => {
-                              markDirty('queue');
+                              markDirty("queue");
                               const next = [...(queueConfig.counters ?? [])];
-                              next[index] = { ...next[index], active: e.target.checked };
-                              setQueueConfig({ ...queueConfig, counters: next });
+                              next[index] = {
+                                ...next[index],
+                                active: e.target.checked,
+                              };
+                              setQueueConfig({
+                                ...queueConfig,
+                                counters: next,
+                              });
                             }}
                           />
                           Active
@@ -1085,10 +1308,12 @@ export function OfferingConfigurePage() {
                         <button
                           type="button"
                           onClick={() => {
-                            markDirty('queue');
+                            markDirty("queue");
                             setQueueConfig({
                               ...queueConfig,
-                              counters: (queueConfig.counters ?? []).filter((_, i) => i !== index),
+                              counters: (queueConfig.counters ?? []).filter(
+                                (_, i) => i !== index,
+                              ),
                             });
                           }}
                           className="text-xs font-semibold text-[#B91C1C]"
@@ -1100,13 +1325,17 @@ export function OfferingConfigurePage() {
                     <button
                       type="button"
                       onClick={() => {
-                        markDirty('queue');
+                        markDirty("queue");
                         const nextId = `counter-${Date.now()}`;
                         setQueueConfig({
                           ...queueConfig,
                           counters: [
                             ...(queueConfig.counters ?? []),
-                            { id: nextId, label: `Counter ${(queueConfig.counters?.length ?? 0) + 1}`, active: true },
+                            {
+                              id: nextId,
+                              label: `Counter ${(queueConfig.counters?.length ?? 0) + 1}`,
+                              active: true,
+                            },
                           ],
                         });
                       }}
@@ -1117,11 +1346,14 @@ export function OfferingConfigurePage() {
                   </div>
                 </div>
               )}
-              {(queueMode === 'appointment_only' || queueMode === 'hybrid') && (
+              {(queueMode === "appointment_only" || queueMode === "hybrid") && (
                 <div className="rounded-xl border border-border bg-[#FAFBFA] p-4">
-                  <p className="text-sm font-semibold text-forest">Appointments</p>
+                  <p className="text-sm font-semibold text-forest">
+                    Appointments
+                  </p>
                   <p className="mt-1 text-xs text-muted">
-                    Use 24-hour office hours. Students only see bookable slots inside this window.
+                    Use 24-hour office hours. Students only see bookable slots
+                    inside this window.
                   </p>
                   <div className="mt-3 grid gap-3 sm:grid-cols-2">
                     <div className="space-y-2">
@@ -1131,7 +1363,7 @@ export function OfferingConfigurePage() {
                         min={5}
                         value={appointmentConfig.slotDurationMinutes}
                         onChange={(e) => {
-                          markDirty('queue');
+                          markDirty("queue");
                           setAppointmentConfig({
                             ...appointmentConfig,
                             slotDurationMinutes: Number(e.target.value),
@@ -1146,7 +1378,7 @@ export function OfferingConfigurePage() {
                         min={1}
                         value={appointmentConfig.slotCapacity}
                         onChange={(e) => {
-                          markDirty('queue');
+                          markDirty("queue");
                           setAppointmentConfig({
                             ...appointmentConfig,
                             slotCapacity: Number(e.target.value),
@@ -1160,7 +1392,7 @@ export function OfferingConfigurePage() {
                         id="hours-start"
                         value={appointmentConfig.operatingHoursStart}
                         onChange={(nextValue) => {
-                          markDirty('queue');
+                          markDirty("queue");
                           setAppointmentConfig({
                             ...appointmentConfig,
                             operatingHoursStart: nextValue,
@@ -1175,7 +1407,7 @@ export function OfferingConfigurePage() {
                         id="hours-end"
                         value={appointmentConfig.operatingHoursEnd}
                         onChange={(nextValue) => {
-                          markDirty('queue');
+                          markDirty("queue");
                           setAppointmentConfig({
                             ...appointmentConfig,
                             operatingHoursEnd: nextValue,
@@ -1192,7 +1424,7 @@ export function OfferingConfigurePage() {
                         max={60}
                         value={appointmentConfig.bookingHorizonDays ?? 14}
                         onChange={(e) => {
-                          markDirty('queue');
+                          markDirty("queue");
                           setAppointmentConfig({
                             ...appointmentConfig,
                             bookingHorizonDays: Number(e.target.value),
@@ -1205,31 +1437,37 @@ export function OfferingConfigurePage() {
                     <Label>Operating days</Label>
                     <div className="flex flex-wrap gap-2">
                       {[
-                        { value: 0, label: 'Sun' },
-                        { value: 1, label: 'Mon' },
-                        { value: 2, label: 'Tue' },
-                        { value: 3, label: 'Wed' },
-                        { value: 4, label: 'Thu' },
-                        { value: 5, label: 'Fri' },
-                        { value: 6, label: 'Sat' },
+                        { value: 0, label: "Sun" },
+                        { value: 1, label: "Mon" },
+                        { value: 2, label: "Tue" },
+                        { value: 3, label: "Wed" },
+                        { value: 4, label: "Thu" },
+                        { value: 5, label: "Fri" },
+                        { value: 6, label: "Sat" },
                       ].map((day) => {
-                        const selected = (appointmentConfig.operatingDays ?? []).includes(day.value);
+                        const selected = (
+                          appointmentConfig.operatingDays ?? []
+                        ).includes(day.value);
                         return (
                           <button
                             key={day.value}
                             type="button"
                             onClick={() => {
-                              markDirty('queue');
-                              const current = appointmentConfig.operatingDays ?? [];
+                              markDirty("queue");
+                              const current =
+                                appointmentConfig.operatingDays ?? [];
                               const next = selected
                                 ? current.filter((value) => value !== day.value)
                                 : [...current, day.value].sort((a, b) => a - b);
-                              setAppointmentConfig({ ...appointmentConfig, operatingDays: next });
+                              setAppointmentConfig({
+                                ...appointmentConfig,
+                                operatingDays: next,
+                              });
                             }}
                             className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${
                               selected
-                                ? 'border-[#0A6640] bg-[#F0FAF5] text-[#0A6640]'
-                                : 'border-border bg-white text-muted'
+                                ? "border-[#0A6640] bg-[#F0FAF5] text-[#0A6640]"
+                                : "border-border bg-white text-muted"
                             }`}
                           >
                             {day.label}
@@ -1238,16 +1476,19 @@ export function OfferingConfigurePage() {
                       })}
                     </div>
                     <p className="text-xs text-muted">
-                      Institute-wide holidays and closures are configured in Institute settings.
+                      Institute-wide holidays and closures are configured in
+                      Institute settings.
                     </p>
                   </div>
                   <div className="mt-4 rounded-xl border border-[#BFDBFE] bg-[#EFF6FF] p-4">
                     <label className="flex items-center gap-2 text-sm font-semibold text-[#1D4ED8]">
                       <input
                         type="checkbox"
-                        checked={appointmentConfig.virtualAppointment?.enabled ?? false}
+                        checked={
+                          appointmentConfig.virtualAppointment?.enabled ?? false
+                        }
                         onChange={(e) => {
-                          markDirty('queue');
+                          markDirty("queue");
                           setAppointmentConfig({
                             ...appointmentConfig,
                             virtualAppointment: {
@@ -1262,9 +1503,10 @@ export function OfferingConfigurePage() {
                     {appointmentConfig.virtualAppointment?.enabled ? (
                       <div className="mt-3 space-y-2 text-sm text-[#052E1C]">
                         <p className="rounded-lg border border-[#BFDBFE] bg-white px-3 py-2 text-xs text-[#4B6358]">
-                          Staff generate real Google Meet links via Google Calendar and send them to
-                          students or other emails. Students cannot invite others. Zoom support is
-                          coming soon.
+                          Staff generate real Google Meet links via Google
+                          Calendar and send them to students or other emails.
+                          Students cannot invite others. Zoom support is coming
+                          soon.
                         </p>
                         <div className="flex flex-wrap gap-2">
                           <span className="rounded-lg bg-white px-2 py-1 text-xs font-semibold text-[#1D4ED8] ring-1 ring-[#BFDBFE]">
@@ -1275,22 +1517,30 @@ export function OfferingConfigurePage() {
                           </span>
                         </div>
                         <div className="mt-3">
-                          <Label htmlFor="virtual-max-invitees">Max additional invitees per meeting</Label>
+                          <Label htmlFor="virtual-max-invitees">
+                            Max additional invitees per meeting
+                          </Label>
                           <Input
                             id="virtual-max-invitees"
                             type="number"
                             min={1}
                             max={500}
-                            value={appointmentConfig.virtualAppointment?.maxAdditionalRecipients ?? 50}
+                            value={
+                              appointmentConfig.virtualAppointment
+                                ?.maxAdditionalRecipients ?? 50
+                            }
                             onChange={(event) => {
-                              markDirty('queue');
+                              markDirty("queue");
                               setAppointmentConfig({
                                 ...appointmentConfig,
                                 virtualAppointment: {
                                   ...appointmentConfig.virtualAppointment,
                                   maxAdditionalRecipients: Math.min(
                                     500,
-                                    Math.max(1, Number(event.target.value) || 50),
+                                    Math.max(
+                                      1,
+                                      Number(event.target.value) || 50,
+                                    ),
                                   ),
                                 },
                               });
@@ -1298,7 +1548,8 @@ export function OfferingConfigurePage() {
                             className="mt-1.5 max-w-[200px]"
                           />
                           <p className="mt-1.5 text-xs text-[#4B6358]">
-                            Staff can add up to this many extra emails when sending a Meet link (e.g. 50 or 100).
+                            Staff can add up to this many extra emails when
+                            sending a Meet link (e.g. 50 or 100).
                           </p>
                         </div>
                       </div>
@@ -1310,20 +1561,25 @@ export function OfferingConfigurePage() {
                     </p>
                   ) : (
                     <p className="mt-3 text-xs text-muted">
-                      Preview: slots generated daily from {appointmentHoursPreview.start} to{' '}
+                      Preview: slots generated daily from{" "}
+                      {appointmentHoursPreview.start} to{" "}
                       {appointmentHoursPreview.end}.
                     </p>
                   )}
                 </div>
               )}
               <div className="rounded-xl border border-border bg-[#FAFBFA] p-4">
-                <p className="text-sm font-semibold text-forest">Visit location</p>
+                <p className="text-sm font-semibold text-forest">
+                  Visit location
+                </p>
                 <p className="mt-1 text-xs text-muted">
                   Shown to students when they book a queue slot or appointment.
                 </p>
                 <div className="mt-3 space-y-3">
                   <div className="space-y-2">
-                    <Label htmlFor="visit-location">Address / campus location</Label>
+                    <Label htmlFor="visit-location">
+                      Address / campus location
+                    </Label>
                     <div className="relative">
                       <MapPin className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
                       <Input
@@ -1331,22 +1587,30 @@ export function OfferingConfigurePage() {
                         className="pl-9"
                         value={visitDetails.visitLocation}
                         onChange={(event) => {
-                          markDirty('queue');
-                          setVisitDetails({ ...visitDetails, visitLocation: event.target.value });
+                          markDirty("queue");
+                          setVisitDetails({
+                            ...visitDetails,
+                            visitLocation: event.target.value,
+                          });
                         }}
                         placeholder="Admissions block, ground floor, main campus"
                       />
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="visit-instructions">Visit instructions</Label>
+                    <Label htmlFor="visit-instructions">
+                      Visit instructions
+                    </Label>
                     <textarea
                       id="visit-instructions"
                       rows={2}
                       value={visitDetails.visitInstructions}
                       onChange={(event) => {
-                        markDirty('queue');
-                        setVisitDetails({ ...visitDetails, visitInstructions: event.target.value });
+                        markDirty("queue");
+                        setVisitDetails({
+                          ...visitDetails,
+                          visitInstructions: event.target.value,
+                        });
                       }}
                       className="flex min-h-[72px] w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                       placeholder="Bring originals, report to reception, etc."
@@ -1356,7 +1620,7 @@ export function OfferingConfigurePage() {
               </div>
               <StepFooter
                 saving={saving}
-                onBack={() => navigateToStep('workflow')}
+                onBack={() => navigateToStep("workflow")}
                 onSaveDraft={() => saveQueue()}
                 onContinue={() => saveQueue({ advance: true })}
               />
@@ -1364,13 +1628,14 @@ export function OfferingConfigurePage() {
           </Card>
         )}
 
-        {step === 'payment' && (
+        {step === "payment" && (
           <Card>
             <CardHeader>
               <CardTitle>Service fee (Razorpay)</CardTitle>
               <CardDescription>
-                Collect admission fees, ID card fees, or other charges online. For admission, use
-                &quot;At a workflow step&quot; and link it to your Fee Payment step.
+                Collect admission fees, ID card fees, or other charges online.
+                For admission, use &quot;At a workflow step&quot; and link it to
+                your Fee Payment step.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -1379,7 +1644,7 @@ export function OfferingConfigurePage() {
                   type="checkbox"
                   checked={paymentConfig.enabled}
                   onChange={(event) => {
-                    markDirty('payment');
+                    markDirty("payment");
                     setPaymentConfig((current) => ({
                       ...current,
                       enabled: event.target.checked,
@@ -1399,7 +1664,7 @@ export function OfferingConfigurePage() {
                       value={paymentConfig.label}
                       placeholder="Admission fee"
                       onChange={(event) => {
-                        markDirty('payment');
+                        markDirty("payment");
                         setPaymentConfig((current) => ({
                           ...current,
                           label: event.target.value,
@@ -1416,7 +1681,7 @@ export function OfferingConfigurePage() {
                       value={paymentConfig.amount}
                       placeholder="5000"
                       onChange={(event) => {
-                        markDirty('payment');
+                        markDirty("payment");
                         setPaymentConfig((current) => ({
                           ...current,
                           amount: event.target.value,
@@ -1425,12 +1690,14 @@ export function OfferingConfigurePage() {
                     />
                   </div>
                   <div className="space-y-2 sm:col-span-2">
-                    <Label htmlFor="payment-timing">When to collect payment</Label>
+                    <Label htmlFor="payment-timing">
+                      When to collect payment
+                    </Label>
                     <Select
                       id="payment-timing"
                       value={paymentConfig.timing}
                       onChange={(value) => {
-                        markDirty('payment');
+                        markDirty("payment");
                         setPaymentConfig((current) => ({
                           ...current,
                           timing: value,
@@ -1438,17 +1705,17 @@ export function OfferingConfigurePage() {
                       }}
                       options={[
                         {
-                          value: 'before_submit',
-                          label: 'Before student submits the request',
+                          value: "before_submit",
+                          label: "Before student submits the request",
                         },
                         {
-                          value: 'workflow_step',
-                          label: 'At a workflow step (e.g. Fee Payment)',
+                          value: "workflow_step",
+                          label: "At a workflow step (e.g. Fee Payment)",
                         },
                       ]}
                     />
                   </div>
-                  {paymentConfig.timing === 'workflow_step' ? (
+                  {paymentConfig.timing === "workflow_step" ? (
                     <div className="space-y-2 sm:col-span-2">
                       <Label htmlFor="payment-step">Workflow step</Label>
                       {steps.length > 0 ? (
@@ -1457,7 +1724,7 @@ export function OfferingConfigurePage() {
                           value={paymentConfig.workflowStepId}
                           placeholder="Select a step"
                           onChange={(value) => {
-                            markDirty('payment');
+                            markDirty("payment");
                             setPaymentConfig((current) => ({
                               ...current,
                               workflowStepId: value,
@@ -1470,8 +1737,8 @@ export function OfferingConfigurePage() {
                         />
                       ) : (
                         <p className="text-xs text-muted">
-                          Save workflow steps first (Workflow tab), then return here to link the fee
-                          step.
+                          Save workflow steps first (Workflow tab), then return
+                          here to link the fee step.
                         </p>
                       )}
                     </div>
@@ -1479,13 +1746,14 @@ export function OfferingConfigurePage() {
                 </div>
               ) : (
                 <p className="text-sm text-muted">
-                  Leave this off if the service is free. Students will not see a Pay button.
+                  Leave this off if the service is free. Students will not see a
+                  Pay button.
                 </p>
               )}
 
               <StepFooter
                 saving={saving}
-                onBack={() => navigateToStep('queue')}
+                onBack={() => navigateToStep("queue")}
                 onSaveDraft={() => savePayment()}
                 onContinue={() => savePayment({ advance: true })}
               />
@@ -1493,12 +1761,13 @@ export function OfferingConfigurePage() {
           </Card>
         )}
 
-        {step === 'review' && (
+        {step === "review" && (
           <Card>
             <CardHeader>
               <CardTitle>Review & activate</CardTitle>
               <CardDescription>
-                Offering must be complete before activation. Students see only active offerings.
+                Offering must be complete before activation. Students see only
+                active offerings.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -1506,21 +1775,29 @@ export function OfferingConfigurePage() {
                 <p className="text-xs font-semibold uppercase tracking-wider text-muted">
                   Programme summary
                 </p>
-                <p className="mt-2 text-lg font-semibold text-forest">{detailsForm.name}</p>
+                <p className="mt-2 text-lg font-semibold text-forest">
+                  {detailsForm.name}
+                </p>
                 {detailsForm.description ? (
-                  <p className="mt-2 text-sm text-muted">{detailsForm.description}</p>
+                  <p className="mt-2 text-sm text-muted">
+                    {detailsForm.description}
+                  </p>
                 ) : null}
                 {applicantFields.length > 0 ? (
                   <ul className="mt-3 space-y-1 text-sm text-foreground">
                     {applicantFields.map((field) => (
                       <li key={field.fieldKey}>
                         {field.label}
-                        {field.required !== false ? ' (required)' : ' (optional)'}
+                        {field.required !== false
+                          ? " (required)"
+                          : " (optional)"}
                       </li>
                     ))}
                   </ul>
                 ) : (
-                  <p className="mt-2 text-sm text-muted">No custom applicant fields configured.</p>
+                  <p className="mt-2 text-sm text-muted">
+                    No custom applicant fields configured.
+                  </p>
                 )}
                 {visitDetails.visitLocation ? (
                   <p className="mt-3 flex items-start gap-2 text-sm text-foreground">
@@ -1533,15 +1810,25 @@ export function OfferingConfigurePage() {
               <dl className="space-y-2 text-sm">
                 <div className="flex justify-between gap-4">
                   <dt className="text-muted">Applicant fields</dt>
-                  <dd>{offering.applicantFields?.length ?? applicantFields.length}</dd>
+                  <dd>
+                    {offering.applicantFields?.length ?? applicantFields.length}
+                  </dd>
                 </div>
                 <div className="flex justify-between gap-4">
-                  <dt className="text-muted">Eligibility rules</dt>
-                  <dd>{offering.eligibilityRules?.length ?? 0}</dd>
+                  <dt className="text-muted">Regular eligibility rules</dt>
+                  <dd>{regularRules.length}</dd>
                 </div>
                 <div className="flex justify-between gap-4">
-                  <dt className="text-muted">Documents</dt>
-                  <dd>{offering.documentRequirements?.length ?? 0}</dd>
+                  <dt className="text-muted">Transfer eligibility rules</dt>
+                  <dd>{transferRules.length}</dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted">Regular documents</dt>
+                  <dd>{regularDocs.length}</dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted">Transfer documents</dt>
+                  <dd>{transferDocs.length}</dd>
                 </div>
                 <div className="flex justify-between gap-4">
                   <dt className="text-muted">Workflow steps</dt>
@@ -1549,30 +1836,37 @@ export function OfferingConfigurePage() {
                 </div>
                 <div className="flex justify-between gap-4">
                   <dt className="text-muted">Queue mode</dt>
-                  <dd>{offering.queueMode?.replace(/_/g, ' ') ?? '—'}</dd>
+                  <dd>{offering.queueMode?.replace(/_/g, " ") ?? "—"}</dd>
                 </div>
                 <div className="flex justify-between gap-4">
                   <dt className="text-muted">Online fee</dt>
                   <dd>
                     {offering.paymentConfig?.enabled
-                      ? `${offering.paymentConfig.label} — ₹${Number(offering.paymentConfig.amount).toLocaleString('en-IN')}`
-                      : 'Not required'}
+                      ? `${offering.paymentConfig.label} — ₹${Number(offering.paymentConfig.amount).toLocaleString("en-IN")}`
+                      : "Not required"}
                   </dd>
                 </div>
               </dl>
               {!offering.completeness?.isComplete && (
                 <p className="rounded-lg border border-sage-light bg-warning-surface px-3 py-2 text-sm text-warning">
-                  Still needed: {formatOfferingMissing(offering.completeness.missing).join(', ')}
+                  Still needed:{" "}
+                  {formatOfferingMissing(offering.completeness.missing).join(
+                    ", ",
+                  )}
                 </p>
               )}
-              {offering.completeness?.isComplete && offering.status !== 'active' && (
-                <p className="rounded-lg border border-sage-light bg-sage/5 px-3 py-2 text-sm text-forest">
-                  All sections are saved. Activate this offering to make it visible to students
-                  and mark the service as active.
-                </p>
-              )}
+              {offering.completeness?.isComplete &&
+                offering.status !== "active" && (
+                  <p className="rounded-lg border border-sage-light bg-sage/5 px-3 py-2 text-sm text-forest">
+                    All sections are saved. Activate this offering to make it
+                    visible to students and mark the service as active.
+                  </p>
+                )}
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
-                <Button variant="outline" onClick={() => navigateToStep('payment')}>
+                <Button
+                  variant="outline"
+                  onClick={() => navigateToStep("payment")}
+                >
                   Back
                 </Button>
                 <div className="flex flex-wrap gap-2">
@@ -1586,7 +1880,10 @@ export function OfferingConfigurePage() {
                       Edit {wizardStep.label.toLowerCase()}
                     </Button>
                   ))}
-                  <Button onClick={handleActivate} disabled={!offering.completeness?.isComplete}>
+                  <Button
+                    onClick={handleActivate}
+                    disabled={!offering.completeness?.isComplete}
+                  >
                     Activate offering
                   </Button>
                 </div>

@@ -1,10 +1,10 @@
-import { Offering } from '../offerings/offering.model.js';
-import { User } from '../users/user.model.js';
-import { AppError } from '../../core/utils/AppError.js';
+import { Offering } from "../offerings/offering.model.js";
+import { User } from "../users/user.model.js";
+import { AppError } from "../../core/utils/AppError.js";
 import {
   evaluateEligibilityRules,
   buildStudentEligibilityProfile,
-} from '../../shared/helpers/eligibilityEvaluation.helper.js';
+} from "../../shared/helpers/eligibilityEvaluation.helper.js";
 
 /**
  * Preview eligibility for a student against an offering.
@@ -15,7 +15,7 @@ import {
 export async function previewStudentEligibility(instituteId, offeringId, user) {
   const offering = await Offering.findOne({ _id: offeringId, instituteId });
   if (!offering) {
-    throw new AppError('Offering not found', 404);
+    throw new AppError("Offering not found", 404);
   }
 
   const rules = offering.eligibilityRules ?? [];
@@ -26,7 +26,7 @@ export async function previewStudentEligibility(instituteId, offeringId, user) {
       eligible: true,
       needsReview: false,
       results: [],
-      message: 'No eligibility rules configured for this option.',
+      message: "No eligibility rules configured for this option.",
     };
   }
 
@@ -35,7 +35,7 @@ export async function previewStudentEligibility(instituteId, offeringId, user) {
     const enrolledOffering = await Offering.findOne({
       _id: user.enrolledOfferingId,
       instituteId,
-    }).select('name');
+    }).select("name");
     profileUser = {
       ...user,
       enrolledProgrammeName: enrolledOffering?.name ?? null,
@@ -43,17 +43,18 @@ export async function previewStudentEligibility(instituteId, offeringId, user) {
   }
 
   const dbUser = await User.findById(user.userId).select(
-    'enrolledProgrammeName enrollmentStatus enrolledOfferingId',
+    "enrolledProgrammeName enrollmentStatus enrolledOfferingId",
   );
 
   const profile = buildStudentEligibilityProfile({
     ...profileUser,
-    enrolledProgrammeName: dbUser?.enrolledProgrammeName ?? profileUser.enrolledProgrammeName,
+    enrolledProgrammeName:
+      dbUser?.enrolledProgrammeName ?? profileUser.enrolledProgrammeName,
     enrollmentStatus: dbUser?.enrollmentStatus,
   });
 
   const evaluation = evaluateEligibilityRules(rules, profile);
-  const needsReview = evaluation.results.some((r) => r.status === 'unchecked');
+  const needsReview = evaluation.results.some((r) => r.status === "unchecked");
 
   return {
     offeringId: offering._id.toString(),
@@ -64,8 +65,8 @@ export async function previewStudentEligibility(instituteId, offeringId, user) {
     results: evaluation.results,
     message: evaluation.eligible
       ? needsReview
-        ? 'You appear eligible, but some requirements need institute review.'
-        : 'You meet all eligibility requirements.'
-      : 'You do not meet all eligibility requirements based on your profile.',
+        ? "You appear eligible, but some requirements need institute review."
+        : "You meet all eligibility requirements."
+      : "You do not meet all eligibility requirements based on your profile.",
   };
 }

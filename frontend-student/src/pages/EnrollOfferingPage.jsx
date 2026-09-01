@@ -1,309 +1,762 @@
-import { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, CalendarDays, ClipboardCheck, Clock3, ListChecks, MapPinned, PartyPopper } from 'lucide-react';
-import { toast } from 'sonner';
-import { PublicLayout } from '@/components/StudentLayout';
-import { EnrollmentOfferingSkeleton } from '@/components/skeletons';
-import { EnrollmentAccordion } from '@/components/enrollment/EnrollmentAccordion';
-import { EligibilityList } from '@/components/enrollment/EligibilityList';
-import { DocumentList } from '@/components/enrollment/DocumentList';
-import { EnrollmentProcessTimeline } from '@/components/enrollment/EnrollmentProcessTimeline';
-import { ApplicationPanel } from '@/components/enrollment/ApplicationPanel';
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+
+import {
+  ArrowLeft,
+  CalendarDays,
+  ClipboardCheck,
+  Clock3,
+  ListChecks,
+  MapPinned,
+} from "lucide-react";
+
+import { toast } from "sonner";
+
+import { PublicLayout } from "@/components/StudentLayout";
+import { EnrollmentOfferingSkeleton } from "@/components/skeletons";
+import { EnrollmentAccordion } from "@/components/enrollment/EnrollmentAccordion";
+import { EligibilityList } from "@/components/enrollment/EligibilityList";
+import { DocumentList } from "@/components/enrollment/DocumentList";
+import { EnrollmentProcessTimeline } from "@/components/enrollment/EnrollmentProcessTimeline";
+import { ApplicationPanel } from "@/components/enrollment/ApplicationPanel";
+
 import {
   createEmptyPhoneValue,
   serializeApplicantDetailsForSubmit,
+  validateApplicantPhoneFields,
   validatePhoneInput,
-} from '@/utils/phone';
-import { getPublicApplicationFormError, isValidApplicantEmail } from '@/utils/applicantDetails';
-import { studentApi } from '@/api/student.api';
+} from "@/utils/phone";
+
+import { studentApi } from "@/api/student.api";
+
 import {
   formatOfferingWindow,
   formatQueueMode,
   getOfferingStats,
   getTotalSlaLabel,
-} from '@/utils/offering';
-import { formatOperatingHoursRange } from '@/utils/operatingHours';
+} from "@/utils/offering";
+
+import { formatOperatingHoursRange } from "@/utils/operatingHours";
+
+/**
+ * ============================================================
+ * HELPERS
+ * ============================================================
+ */
+
+/**
+ * Return Regular / Transfer configuration from the offering.
+ *
+ * Backward compatibility:
+ *
+ * Existing offering:
+ *   eligibilityRules
+ *   documentRequirements
+ *
+ * is treated as REGULAR.
+ */
+function getAdmissionConfiguration(offering, admissionType) {
+  const type = admissionType === "TRANSFER" ? "TRANSFER" : "REGULAR";
+
+  const groupedEligibility = offering?.eligibilityByAdmissionType ?? {};
+
+  const groupedDocuments = offering?.documentsByAdmissionType ?? {};
+
+  const regularRules = Array.isArray(groupedEligibility.regular)
+    ? groupedEligibility.regular
+    : (offering?.eligibilityRules ?? []);
+
+  const transferRules = Array.isArray(groupedEligibility.transfer)
+    ? groupedEligibility.transfer
+    : [];
+
+  const regularDocuments = Array.isArray(groupedDocuments.regular)
+    ? groupedDocuments.regular
+    : (offering?.documentRequirements ?? []);
+
+  const transferDocuments = Array.isArray(groupedDocuments.transfer)
+    ? groupedDocuments.transfer
+    : [];
+
+  return {
+    admissionType: type,
+
+    eligibilityRules: type === "TRANSFER" ? transferRules : regularRules,
+
+    documentRequirements:
+      type === "TRANSFER" ? transferDocuments : regularDocuments,
+  };
+}
+
+/**
+ * Admission-type label shown to the student.
+ */
+function getAdmissionLabel(admissionType) {
+  return admissionType === "TRANSFER"
+    ? "Transfer Admission"
+    : "Regular Admission";
+}
+
+/**
+ * ============================================================
+ * MAIN PAGE
+ * ============================================================
+ */
 
 export function EnrollOfferingPage() {
   const { instituteId, offeringId } = useParams();
+
   const navigate = useNavigate();
+
   const [institute, setInstitute] = useState(null);
+
   const [offering, setOffering] = useState(null);
+
   const [loading, setLoading] = useState(true);
+
   const [submitting, setSubmitting] = useState(false);
-  const [applicantName, setApplicantName] = useState('');
-  const [applicantEmail, setApplicantEmail] = useState('');
+
+  const [applicantName, setApplicantName] = useState("");
+
+  const [applicantEmail, setApplicantEmail] = useState("");
+
   const [applicantMobile, setApplicantMobile] = useState(createEmptyPhoneValue);
+
   const [intakeDocumentFile, setIntakeDocumentFile] = useState(null);
+
   const [applicantDetails, setApplicantDetails] = useState({});
+
   const [intakeStatus, setIntakeStatus] = useState(null);
+
   const [checkingIntake, setCheckingIntake] = useState(false);
-  const [showFieldErrors, setShowFieldErrors] = useState(false);
-  const submitLockRef = useRef(false);
+
+  /**
+   * ==========================================================
+   * ADMISSION TYPE
+   * ==========================================================
+   *
+   * Student chooses:
+   *
+   * REGULAR
+   * TRANSFER
+   *
+   * The selected type controls:
+   *
+   * - eligibility rules
+   * - document requirements
+   * - application admissionType
+   */
+  const [admissionType, setAdmissionType] = useState("REGULAR");
+
+  /**
+   * ==========================================================
+   * LOAD OFFERING
+   * ==========================================================
+   */
 
   useEffect(() => {
+    let cancelled = false;
+
+    if (!instituteId || !offeringId) {
+      return undefined;
+    }
+
+    setLoading(true);
+
     Promise.all([
       studentApi.getInstitute(instituteId),
+
       studentApi.getEnrollmentOffering(instituteId, offeringId),
     ])
       .then(([instituteRes, offeringRes]) => {
-        setInstitute(instituteRes.data.data.institute);
-        setOffering(offeringRes.data.data.offering);
+        if (cancelled) {
+          return;
+        }
+
+        setInstitute(instituteRes?.data?.data?.institute ?? null);
+
+        setOffering(offeringRes?.data?.data?.offering ?? null);
       })
       .catch((err) => {
-        toast.error(err.message || 'Failed to load programme');
-        navigate(`/${instituteId}/enroll`, { replace: true });
+        if (cancelled) {
+          return;
+        }
+
+        toast.error(err?.message ?? "Failed to load programme");
+
+        navigate(`/${instituteId}/enroll`, {
+          replace: true,
+        });
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [instituteId, offeringId, navigate]);
+
+  /**
+   * ==========================================================
+   * ADMISSION CONFIGURATION
+   * ==========================================================
+   */
+
+  const admissionConfig = useMemo(
+    () => getAdmissionConfiguration(offering, admissionType),
+    [offering, admissionType],
+  );
+
+  const { eligibilityRules, documentRequirements } = admissionConfig;
+
+  /**
+   * ==========================================================
+   * CHECK EXISTING INTAKE
+   * ==========================================================
+   */
 
   useEffect(() => {
     const email = applicantEmail.trim();
-    if (!isValidApplicantEmail(email)) {
+
+    if (!email || !email.includes("@")) {
       setIntakeStatus(null);
+
       return undefined;
     }
 
     setCheckingIntake(true);
+
     const timer = window.setTimeout(() => {
       studentApi
-        .getEnrollmentIntakeStatus(instituteId, offeringId, email)
-        .then(({ data }) => setIntakeStatus(data.data.intake ?? null))
-        .catch(() => setIntakeStatus(null))
-        .finally(() => setCheckingIntake(false));
+        .getEnrollmentIntakeStatus(
+          instituteId,
+          offeringId,
+          email,
+          admissionType,
+        )
+        .then(({ data }) => {
+          setIntakeStatus(data?.data?.intake ?? null);
+        })
+        .catch(() => {
+          setIntakeStatus(null);
+        })
+        .finally(() => {
+          setCheckingIntake(false);
+        });
     }, 400);
 
     return () => window.clearTimeout(timer);
-  }, [applicantEmail, instituteId, offeringId]);
+  }, [applicantEmail, instituteId, offeringId, admissionType]);
+
+  /**
+   * ==========================================================
+   * CHANGE ADMISSION TYPE
+   * ==========================================================
+   */
+
+  const handleAdmissionTypeChange = (nextType) => {
+    const normalized = nextType === "TRANSFER" ? "TRANSFER" : "REGULAR";
+
+    setAdmissionType(normalized);
+
+    /*
+     * Clear a previously selected intake document.
+     *
+     * This prevents accidentally submitting a document
+     * selected under the other admission flow.
+     */
+    setIntakeDocumentFile(null);
+
+    /*
+     * Existing intake state may belong to the previous
+     * admission type.
+     */
+    setIntakeStatus(null);
+  };
+
+  /**
+   * ==========================================================
+   * SUBMIT
+   * ==========================================================
+   */
 
   const onSubmit = async (event) => {
     event.preventDefault();
-    if (submitLockRef.current || submitting) return;
-
-    const formError = getPublicApplicationFormError({
-      applicantName,
-      applicantEmail,
-      applicantMobile,
-      applicantDetails,
-      offering,
-      intakeDocumentFile,
-    });
-    if (formError) {
-      setShowFieldErrors(true);
-      return;
-    }
 
     if (intakeStatus?.canSubmit === false) {
-      toast.error(intakeStatus.message || 'You cannot submit another request right now.');
+      toast.error(
+        intakeStatus.message || "You cannot submit another request right now.",
+      );
+
       return;
     }
 
-    const name = applicantName.trim();
-    const email = applicantEmail.trim();
+    /**
+     * Phone validation.
+     */
     const mobileResult = validatePhoneInput(applicantMobile);
 
-    submitLockRef.current = true;
+    if (!mobileResult.valid) {
+      toast.error(mobileResult.error || "Enter a valid mobile number");
+
+      return;
+    }
+
+    /**
+     * Applicant field validation.
+     */
+    const phoneFieldError = validateApplicantPhoneFields(
+      offering?.applicantFields ?? [],
+      applicantDetails,
+    );
+
+    if (phoneFieldError) {
+      toast.error(phoneFieldError);
+
+      return;
+    }
+
+    /**
+     * Intake document validation.
+     */
+    const intakeDocument = offering?.intakeDocument;
+
+    if (
+      intakeDocument?.label &&
+      intakeDocument.required !== false &&
+      !intakeDocumentFile
+    ) {
+      toast.error(`Please upload your ${intakeDocument.label}`);
+
+      return;
+    }
+
+    /**
+     * Prevent submission when the selected admission
+     * type has no active documents only when the institution
+     * explicitly configured documents for that type.
+     *
+     * We do not force documents when none are configured.
+     */
     setSubmitting(true);
+
     try {
       await studentApi.createApplication(
         instituteId,
         {
           offeringId,
-          applicantName: name,
-          applicantEmail: email,
+
+          applicantName: applicantName.trim(),
+
+          applicantEmail: applicantEmail.trim().toLowerCase(),
+
           applicantMobile: mobileResult.e164,
+
           applicantDetails: serializeApplicantDetailsForSubmit(
             offering?.applicantFields ?? [],
             applicantDetails,
           ),
+
+          /**
+           * Critical:
+           * Tell backend whether this is
+           * Regular or Transfer admission.
+           */
+          admissionType,
         },
+
         intakeDocumentFile,
       );
-      toast.success('Application submitted', {
-        description: 'You will receive an email with next steps once it is reviewed.',
-        duration: 10_000,
-        icon: <PartyPopper className="h-5 w-5" aria-hidden />,
-      });
-      setApplicantName('');
-      setApplicantEmail('');
+
+      toast.success(
+        `${getAdmissionLabel(
+          admissionType,
+        )} request submitted. Your institute will review authorization before you can sign in.`,
+      );
+
+      setApplicantName("");
+
+      setApplicantEmail("");
+
       setApplicantMobile(createEmptyPhoneValue());
+
       setIntakeDocumentFile(null);
+
       setApplicantDetails({});
+
       setIntakeStatus(null);
-      setShowFieldErrors(false);
     } catch (err) {
-      toast.error(err.message || 'Failed to start application');
+      /*
+       * Backend AppError messages should now reach the
+       * student instead of a generic Internal Server Error.
+       */
+      const message =
+        err?.response?.data?.message ??
+        err?.message ??
+        `Failed to start ${getAdmissionLabel(
+          admissionType,
+        ).toLowerCase()} application`;
+
+      toast.error(message);
     } finally {
-      submitLockRef.current = false;
       setSubmitting(false);
     }
   };
 
-  const eligibilityCount = offering?.eligibilityRules?.length ?? 0;
-  const documentCount = offering?.documentRequirements?.length ?? 0;
+  /**
+   * ==========================================================
+   * COUNTS
+   * ==========================================================
+   */
+
+  const eligibilityCount =
+    eligibilityRules?.filter((rule) => rule?.enabled !== false).length ?? 0;
+
+  const documentCount =
+    documentRequirements?.filter(
+      (document) => document?.enabled !== false && document?.required !== false,
+    ).length ?? 0;
+
   const processCount = offering?.workflowSteps?.length ?? 0;
+
+  /**
+   * ==========================================================
+   * LOADING
+   * ==========================================================
+   */
 
   if (loading) {
     return (
-      <PublicLayout fillViewport instituteName={institute?.name} instituteId={instituteId}>
+      <PublicLayout instituteName={institute?.name} instituteId={instituteId}>
         <EnrollmentOfferingSkeleton />
       </PublicLayout>
     );
   }
 
+  /**
+   * ==========================================================
+   * PAGE
+   * ==========================================================
+   */
+
   return (
-    <PublicLayout fillViewport instituteName={institute?.name} instituteId={instituteId}>
-      <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col px-4 py-6 sm:px-6 lg:h-full lg:min-h-0 lg:overflow-hidden">
+    <PublicLayout instituteName={institute?.name} instituteId={instituteId}>
+      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10">
         <Link
           to={`/${instituteId}/enroll`}
-          className="inline-flex shrink-0 items-center gap-2 text-sm font-semibold text-[#0A6640]"
+          className="inline-flex items-center gap-2 text-sm font-semibold text-[#0A6640]"
         >
           <ArrowLeft className="h-4 w-4" />
           All programmes
         </Link>
 
-        <div className="mt-5 grid min-h-0 flex-1 gap-8 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.75fr)] lg:grid-rows-[minmax(0,1fr)] lg:overflow-hidden">
-          <div className="min-w-0 space-y-8 lg:min-h-0 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
-            <div className="rounded-xl border border-[#D1EEE0] bg-white/90 p-6 shadow-sm">
-              <div className="flex flex-col gap-5">
-                <div className="min-w-0">
-                  <p className="text-xs font-bold uppercase tracking-[0.15em] text-[#10B981]">
-                    Programme details
-                  </p>
-                  <h1 className="mt-2 text-3xl font-bold tracking-tight text-[#052E1C]">
-                    {offering?.name ?? 'Programme details'}
-                  </h1>
-                  {offering?.description && (
-                    <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[#4B6358]">
-                      {offering.description}
-                    </p>
-                  )}
-                  {!institute?.name ? null : (
-                    <p className="mt-2 text-xs font-medium text-[#6B7280]">{institute.name}</p>
-                  )}
-                  {offering?.visitLocation ? (
-                    <p className="mt-3 inline-flex items-start gap-2 rounded-lg border border-[#E2EEE8] bg-[#F9FCFB] px-3 py-2 text-xs font-medium text-[#052E1C]">
-                      <MapPinned className="mt-0.5 h-4 w-4 shrink-0 text-[#0A6640]" />
-                      <span>
-                        {offering.visitLocation}
-                        {offering.visitInstructions ? (
-                          <span className="mt-1 block font-normal text-[#4B6358]">
-                            {offering.visitInstructions}
-                          </span>
-                        ) : null}
+        {/* ==================================================
+            PROGRAMME HEADER
+            ================================================== */}
+
+        <div className="mt-5 rounded-xl border border-[#D1EEE0] bg-white/90 p-6 shadow-sm">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.15em] text-[#10B981]">
+                Programme details
+              </p>
+
+              <h1 className="mt-2 text-3xl font-bold tracking-tight text-[#052E1C]">
+                {offering?.name ?? "Programme details"}
+              </h1>
+
+              {offering?.description && (
+                <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[#4B6358]">
+                  {offering.description}
+                </p>
+              )}
+
+              {!institute?.name ? null : (
+                <p className="mt-2 text-xs font-medium text-[#6B7280]">
+                  {institute.name}
+                </p>
+              )}
+
+              {offering?.visitLocation ? (
+                <p className="mt-3 inline-flex items-start gap-2 rounded-lg border border-[#E2EEE8] bg-[#F9FCFB] px-3 py-2 text-xs font-medium text-[#052E1C]">
+                  <MapPinned className="mt-0.5 h-4 w-4 shrink-0 text-[#0A6640]" />
+
+                  <span>
+                    {offering.visitLocation}
+
+                    {offering.visitInstructions ? (
+                      <span className="mt-1 block font-normal text-[#4B6358]">
+                        {offering.visitInstructions}
                       </span>
-                    </p>
-                  ) : null}
-                </div>
-                <div className="grid gap-2 text-sm sm:grid-cols-2">
-                  <MetaPill icon={CalendarDays} label={formatOfferingWindow(offering)} />
-                  <MetaPill icon={MapPinned} label={formatQueueMode(offering.queueMode)} />
-                  <MetaPill icon={Clock3} label={getTotalSlaLabel(offering.workflowSteps)} />
-                </div>
-              </div>
-              <div className="mt-6 grid gap-3 sm:grid-cols-3">
-                {getOfferingStats(offering).map((stat) => (
-                  <div key={stat.label} className="rounded-xl border border-[#E2EEE8] bg-[#F9FCFB] p-4">
-                    <p className="text-2xl font-bold text-[#052E1C]">{stat.value}</p>
-                    <p className="mt-1 text-xs font-semibold text-[#4B6358]">{stat.label}</p>
-                  </div>
-                ))}
-              </div>
+                    ) : null}
+                  </span>
+                </p>
+              ) : null}
             </div>
 
-            <div className="space-y-4">
-              <EnrollmentAccordion
-                title="Am I eligible?"
-                count={eligibilityCount}
-                defaultOpen
-              >
-                <EligibilityList rules={offering?.eligibilityRules} />
-              </EnrollmentAccordion>
+            <div className="grid gap-2 text-sm sm:grid-cols-2 lg:w-80 lg:grid-cols-1">
+              <MetaPill
+                icon={CalendarDays}
+                label={formatOfferingWindow(offering)}
+              />
 
-              <EnrollmentAccordion title="Documents you'll need" count={documentCount}>
-                <DocumentList documents={offering?.documentRequirements} />
-              </EnrollmentAccordion>
+              <MetaPill
+                icon={MapPinned}
+                label={formatQueueMode(offering.queueMode)}
+              />
 
-              <EnrollmentAccordion title="Enrollment process" count={processCount}>
-                <EnrollmentProcessTimeline steps={offering?.workflowSteps} />
-              </EnrollmentAccordion>
-
-              <EnrollmentAccordion title="Queue or appointment access" count={offering?.queueMode ? 1 : 0}>
-                <AccessModePanel offering={offering} />
-              </EnrollmentAccordion>
+              <MetaPill
+                icon={Clock3}
+                label={getTotalSlaLabel(offering.workflowSteps)}
+              />
             </div>
           </div>
 
-          <aside className="min-w-0 lg:min-h-0 lg:overflow-y-auto lg:overscroll-contain lg:pb-4 lg:scroll-pb-6">
-            <div className="lg:pb-2">
-              <ApplicationPanel
-                visible
-                offering={offering}
-                applicantName={applicantName}
-                applicantEmail={applicantEmail}
-                applicantMobile={applicantMobile}
-                intakeDocumentFile={intakeDocumentFile}
-                applicantDetails={applicantDetails}
-                onNameChange={setApplicantName}
-                onEmailChange={setApplicantEmail}
-                onMobileChange={setApplicantMobile}
-                onIntakeDocumentChange={setIntakeDocumentFile}
-                onApplicantDetailChange={(fieldKey, value) =>
-                  setApplicantDetails((current) => ({ ...current, [fieldKey]: value }))
-                }
-                onSubmit={onSubmit}
-                showErrors={showFieldErrors}
-                submitting={submitting}
-                intakeStatus={intakeStatus}
-                checkingIntake={checkingIntake}
-              />
+          <div className="mt-6 grid gap-3 sm:grid-cols-3">
+            {getOfferingStats(offering).map((stat) => (
+              <div
+                key={stat.label}
+                className="rounded-xl border border-[#E2EEE8] bg-[#F9FCFB] p-4"
+              >
+                <p className="text-2xl font-bold text-[#052E1C]">
+                  {stat.value}
+                </p>
+
+                <p className="mt-1 text-xs font-semibold text-[#4B6358]">
+                  {stat.label}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ==================================================
+            ADMISSION TYPE
+            ================================================== */}
+
+        <div className="mt-6 rounded-xl border border-[#D1EEE0] bg-white p-5 shadow-sm">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-bold text-[#052E1C]">
+                Select admission type
+              </p>
+
+              <p className="mt-1 text-xs text-[#4B6358]">
+                Eligibility and document requirements depend on the admission
+                type you choose.
+              </p>
             </div>
-          </aside>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => handleAdmissionTypeChange("REGULAR")}
+                className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+                  admissionType === "REGULAR"
+                    ? "border-[#0A6640] bg-[#0A6640] text-white"
+                    : "border-[#D5E5DE] bg-white text-[#052E1C] hover:bg-[#F5FAF7]"
+                }`}
+              >
+                Regular Admission
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleAdmissionTypeChange("TRANSFER")}
+                className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+                  admissionType === "TRANSFER"
+                    ? "border-[#0A6640] bg-[#0A6640] text-white"
+                    : "border-[#D5E5DE] bg-white text-[#052E1C] hover:bg-[#F5FAF7]"
+                }`}
+              >
+                Transfer Admission
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-3 rounded-lg border border-[#E2EEE8] bg-[#F9FCFB] px-3 py-2 text-xs text-[#4B6358]">
+            Selected:
+            <span className="ml-1 font-bold text-[#052E1C]">
+              {getAdmissionLabel(admissionType)}
+            </span>
+          </div>
+        </div>
+
+        {/* ==================================================
+            CONTENT
+            ================================================== */}
+
+        <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.75fr)] lg:items-start">
+          <div className="space-y-4">
+            {/* =================================================
+                ELIGIBILITY
+                ================================================= */}
+
+            <EnrollmentAccordion
+              title={`Am I eligible for ${getAdmissionLabel(admissionType)}?`}
+              count={eligibilityCount}
+              defaultOpen
+            >
+              <EligibilityList
+                rules={eligibilityRules}
+                admissionType={admissionType}
+              />
+            </EnrollmentAccordion>
+
+            {/* =================================================
+                DOCUMENTS
+                ================================================= */}
+
+            <EnrollmentAccordion
+              title={`Documents needed for ${getAdmissionLabel(admissionType)}`}
+              count={documentCount}
+            >
+              <DocumentList documents={documentRequirements} />
+            </EnrollmentAccordion>
+
+            {/* =================================================
+                PROCESS
+                ================================================= */}
+
+            <EnrollmentAccordion
+              title="Enrollment process"
+              count={processCount}
+            >
+              <EnrollmentProcessTimeline steps={offering?.workflowSteps} />
+            </EnrollmentAccordion>
+
+            {/* =================================================
+                QUEUE / APPOINTMENT
+                ================================================= */}
+
+            <EnrollmentAccordion
+              title="Queue or appointment access"
+              count={offering?.queueMode ? 1 : 0}
+            >
+              <AccessModePanel offering={offering} />
+            </EnrollmentAccordion>
+          </div>
+
+          {/* ==================================================
+              APPLICATION PANEL
+              ================================================== */}
+
+          <div className="lg:sticky lg:top-24">
+            <ApplicationPanel
+              visible
+              offering={offering}
+              applicantName={applicantName}
+              applicantEmail={applicantEmail}
+              applicantMobile={applicantMobile}
+              intakeDocumentFile={intakeDocumentFile}
+              applicantDetails={applicantDetails}
+              onNameChange={setApplicantName}
+              onEmailChange={setApplicantEmail}
+              onMobileChange={setApplicantMobile}
+              onIntakeDocumentChange={setIntakeDocumentFile}
+              onApplicantDetailChange={(fieldKey, value) =>
+                setApplicantDetails((current) => ({
+                  ...current,
+
+                  [fieldKey]: value,
+                }))
+              }
+              onSubmit={onSubmit}
+              submitting={submitting}
+              intakeStatus={intakeStatus}
+              checkingIntake={checkingIntake}
+              /*
+               * Extra prop.
+               *
+               * Existing ApplicationPanel can ignore this if it
+               * does not use it. If you later update the panel,
+               * it can display the selected admission type.
+               */
+              admissionType={admissionType}
+              admissionLabel={getAdmissionLabel(admissionType)}
+            />
+          </div>
         </div>
       </div>
     </PublicLayout>
   );
 }
 
+/**
+ * ============================================================
+ * META PILL
+ * ============================================================
+ */
+
 function MetaPill({ icon: Icon, label }) {
   return (
     <span className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-[#E2EEE8] bg-[#F9FCFB] px-3 text-xs font-semibold text-[#052E1C]">
       <Icon className="h-4 w-4 shrink-0 text-[#0A6640]" />
+
       {label}
     </span>
   );
 }
 
+/**
+ * ============================================================
+ * ACCESS MODE
+ * ============================================================
+ */
+
 function AccessModePanel({ offering }) {
-  const hasQueue = offering.queueMode === 'queue_only' || offering.queueMode === 'hybrid';
-  const hasAppointment = offering.queueMode === 'appointment_only' || offering.queueMode === 'hybrid';
+  const hasQueue =
+    offering.queueMode === "queue_only" || offering.queueMode === "hybrid";
+
+  const hasAppointment =
+    offering.queueMode === "appointment_only" ||
+    offering.queueMode === "hybrid";
 
   return (
     <div className="space-y-4">
       <p className="text-sm text-[#4B6358]">
-        For this programme you can{' '}
-        <span className="font-semibold text-[#052E1C]">{formatQueueMode(offering.queueMode).toLowerCase()}</span>.
+        For this programme you can{" "}
+        <span className="font-semibold text-[#052E1C]">
+          {formatQueueMode(offering.queueMode).toLowerCase()}
+        </span>
+        .
       </p>
+
       <div className="grid gap-3 sm:grid-cols-2">
         {hasQueue && (
           <div className="rounded-xl border border-[#E2EEE8] bg-[#F9FCFB] p-4">
             <ListChecks className="h-4 w-4 text-[#0A6640]" />
-            <p className="mt-2 text-sm font-semibold text-[#052E1C]">Walk-in queue</p>
+
+            <p className="mt-2 text-sm font-semibold text-[#052E1C]">
+              Walk-in queue
+            </p>
+
             <p className="mt-1 text-xs text-[#4B6358]">
-              Join the queue when you visit. About{' '}
-              {offering.queueConfig?.capacity ?? 'limited'} students can wait at a time.
+              Join the queue when you visit. About{" "}
+              {offering.queueConfig?.capacity ?? "limited"} students can wait at
+              a time.
             </p>
           </div>
         )}
+
         {hasAppointment && (
           <div className="rounded-xl border border-[#E2EEE8] bg-[#F9FCFB] p-4">
             <ClipboardCheck className="h-4 w-4 text-[#0A6640]" />
-            <p className="mt-2 text-sm font-semibold text-[#052E1C]">Book a time slot</p>
+
+            <p className="mt-2 text-sm font-semibold text-[#052E1C]">
+              Book a time slot
+            </p>
+
             <p className="mt-1 text-xs text-[#4B6358]">
-              {offering.appointmentConfig?.slotDurationMinutes ?? 'Flexible'}-minute slots between{' '}
+              {offering.appointmentConfig?.slotDurationMinutes ?? "Flexible"}
+              -minute slots between{" "}
               {formatOperatingHoursRange(
-                offering.appointmentConfig?.operatingHoursStart ?? '09:00',
-                offering.appointmentConfig?.operatingHoursEnd ?? '17:00',
+                offering.appointmentConfig?.operatingHoursStart ?? "09:00",
+
+                offering.appointmentConfig?.operatingHoursEnd ?? "17:00",
               )}
               .
             </p>

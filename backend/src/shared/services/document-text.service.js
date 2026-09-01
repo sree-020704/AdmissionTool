@@ -1,176 +1,400 @@
-import fs from 'fs';
-import path from 'path';
-import { logger } from '../../core/logger/index.js';
+import fs from "fs";
 
-/** Per-document and combined-corpus cap (real prospectuses exceed the old 80k limit). */
+/** Maximum extracted text used by RAG/corpus processing. */
 const MAX_EXTRACT_CHARS = 200_000;
 
+/** Maximum text sent to the text-based verifier. */
+const MAX_VERIFY_TEXT_CHARS = 12_000;
+
+/** Minimum text required for a text-only document. */
+const MIN_READABLE_TEXT_CHARS = 20;
+
+/** Supported image MIME types. */
+const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
+
 /**
- * Keep paragraph/list structure for chunking while normalizing noisy PDF whitespace.
+ * Normalize extracted text.
+ *
  * @param {string} text
+ * @returns {string}
  */
 function normalizeExtractedText(text) {
+  if (!text || typeof text !== "string") {
+    return "";
+  }
+
   return text
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n[ \t]+/g, '\n')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
 /**
- * Browsers/OS often send octet-stream or empty mime for PDFs.
- * @param {string} filePath
- * @param {string} [mimeType]
- */
-function resolveExtractKind(filePath, mimeType = '') {
-  const mime = (mimeType || '').toLowerCase();
-  const ext = path.extname(filePath).toLowerCase();
-
-  if (mime === 'application/pdf' || mime === 'application/x-pdf' || ext === '.pdf') {
-    return 'pdf';
-  }
-  if (
-    mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
-    mime === 'application/msword' ||
-    ext === '.docx' ||
-    ext === '.doc'
-  ) {
-    return 'docx';
-  }
-  if (mime === 'text/plain' || mime === 'text/markdown' || ext === '.txt' || ext === '.md') {
-    return 'text';
-  }
-  return 'unknown';
-}
-
-/**
+ * Extract readable text from a document.
+ *
+ * PDFs are still extracted here because other parts of the
+ * application may need text/RAG processing.
+ *
+ * IMPORTANT:
+ * Verification does NOT depend on this extraction for PDFs.
+ *
  * @param {string} filePath
  * @param {string} mimeType
  * @returns {Promise<string>}
  */
 export async function extractTextFromDocument(filePath, mimeType) {
+  if (!filePath) {
+    console.warn("[document-text] No file path provided");
+
+    return "";
+  }
+
   if (!fs.existsSync(filePath)) {
-    logger.warn({ filePath }, 'Knowledge file missing on disk during text extract');
-    return '';
+    console.warn(`[document-text] File does not exist: ${filePath}`);
+
+    return "";
   }
 
-  const kind = resolveExtractKind(filePath, mimeType);
-  let text = '';
+  let text = "";
 
-  if (kind === 'pdf') {
-    text = await extractPdfText(filePath);
-  } else if (kind === 'docx') {
-    text = await extractDocxText(filePath);
-  } else if (kind === 'text') {
-    text = fs.readFileSync(filePath, 'utf8');
+  try {
+    if (mimeType === "application/pdf") {
+      text = await extractPdfText(filePath);
+    } else if (
+      mimeType ===
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+      mimeType === "application/msword"
+    ) {
+      text = await extractDocxText(filePath);
+    } else if (mimeType === "text/plain" || mimeType === "text/markdown") {
+      text = fs.readFileSync(filePath, "utf8");
+    } else {
+      console.warn(`[document-text] Unsupported MIME type: ${mimeType}`);
+
+      return "";
+    }
+  } catch (error) {
+    console.error("[document-text] Document extraction failed", {
+      filePath,
+      mimeType,
+      error: error?.message ?? String(error),
+    });
+
+    return "";
   }
 
-  return normalizeExtractedText(text).slice(0, MAX_EXTRACT_CHARS);
+  const normalized = normalizeExtractedText(text);
+
+  return normalized.slice(0, MAX_EXTRACT_CHARS);
 }
 
 /**
- * pdf-parse v2 uses PDFParse({ data }).getText(), not the v1 default function(buffer).
+ * Extract text from PDF using pdf-parse v2.
+ *
  * @param {string} filePath
+ * @returns {Promise<string>}
  */
 async function extractPdfText(filePath) {
-  let parser;
+  let parser = null;
+
   try {
-    const { PDFParse } = await import('pdf-parse');
+    const { PDFParse } = await import("pdf-parse");
+
+    if (!PDFParse) {
+      throw new Error("PDFParse export was not found");
+    }
+
     const buffer = fs.readFileSync(filePath);
-    parser = new PDFParse({ data: buffer });
+
+    if (!buffer.length) {
+      throw new Error("PDF file is empty");
+    }
+
+    parser = new PDFParse({
+      data: buffer,
+    });
+
     const result = await parser.getText();
-    return result?.text ?? '';
-  } catch (err) {
-    logger.error({ err, filePath }, 'PDF text extraction failed');
-    return '';
+
+    const text = result?.text ?? "";
+
+    const normalized = normalizeExtractedText(text);
+
+    console.log("[document-text] PDF extraction successful", {
+      filePath,
+      extractedCharacters: normalized.length,
+    });
+
+    return normalized;
+  } catch (error) {
+    console.error("[document-text] PDF extraction failed", {
+      filePath,
+      error: error?.message ?? String(error),
+    });
+
+    return "";
   } finally {
-    if (parser) {
-      await parser.destroy().catch(() => {});
+    try {
+      if (parser && typeof parser.destroy === "function") {
+        await parser.destroy();
+      }
+    } catch (error) {
+      console.warn("[document-text] PDF parser destroy failed", {
+        error: error?.message ?? String(error),
+      });
     }
   }
 }
 
 /**
+ * Extract text from DOCX/DOC.
+ *
  * @param {string} filePath
+ * @returns {Promise<string>}
  */
 async function extractDocxText(filePath) {
   try {
-    const mammoth = await import('mammoth');
-    const result = await mammoth.extractRawText({ path: filePath });
-    return result.value ?? '';
-  } catch (err) {
-    logger.error({ err, filePath }, 'DOCX text extraction failed');
-    return '';
+    const mammoth = await import("mammoth");
+
+    const result = await mammoth.extractRawText({
+      path: filePath,
+    });
+
+    const text = result?.value ?? "";
+
+    const normalized = normalizeExtractedText(text);
+
+    console.log("[document-text] DOCX extraction successful", {
+      filePath,
+      extractedCharacters: normalized.length,
+    });
+
+    return normalized;
+  } catch (error) {
+    console.error("[document-text] DOCX extraction failed", {
+      filePath,
+      error: error?.message ?? String(error),
+    });
+
+    return "";
   }
 }
 
-const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png']);
-
-/** Cap text sent to the verification model per document (keeps prompts small). */
-const MAX_VERIFY_TEXT_CHARS = 12_000;
-
 /**
- * Decide how a single uploaded file should be fed to the AI verifier:
- * - images -> base64 data URL for a vision model
- * - text-based PDF/DOCX/TXT -> extracted text
- * - scanned PDF (no text layer) or unknown -> unreadable (escalate to staff)
+ * Convert a local image to a Gemini-ready data URL.
  *
  * @param {string} filePath
  * @param {string} mimeType
- * @returns {Promise<{ kind: 'image' | 'text' | 'unreadable', text?: string, dataUrl?: string, reason?: string }>}
+ * @returns {Promise<string|null>}
  */
-export async function prepareDocumentForVerification(filePath, mimeType) {
-  if (!filePath || !fs.existsSync(filePath)) {
-    return { kind: 'unreadable', reason: 'File is missing on the server' };
-  }
+async function imageFileToDataUrl(filePath, mimeType) {
+  try {
+    const buffer = fs.readFileSync(filePath);
 
-  if (IMAGE_MIME_TYPES.has(mimeType)) {
-    try {
-      const buffer = fs.readFileSync(filePath);
-      const dataUrl = `data:${mimeType};base64,${buffer.toString('base64')}`;
-      return { kind: 'image', dataUrl };
-    } catch {
-      return { kind: 'unreadable', reason: 'Image could not be read' };
+    if (!buffer.length) {
+      return null;
     }
+
+    return `data:${mimeType};base64,${buffer.toString("base64")}`;
+  } catch (error) {
+    console.error("[document-text] Failed to load image", {
+      filePath,
+      mimeType,
+      error: error?.message ?? String(error),
+    });
+
+    return null;
   }
-
-  const text = await extractTextFromDocument(filePath, mimeType);
-  const trimmed = text.trim();
-
-  if (trimmed.length >= 20) {
-    return { kind: 'text', text: trimmed.slice(0, MAX_VERIFY_TEXT_CHARS) };
-  }
-
-  if (resolveExtractKind(filePath, mimeType) === 'pdf') {
-    return {
-      kind: 'unreadable',
-      reason: 'PDF appears to be scanned with no extractable text layer',
-    };
-  }
-
-  return { kind: 'unreadable', reason: 'No readable content found in the file' };
 }
 
 /**
- * @param {Array<{ extractedText?: string, filePath?: string, mimeType?: string, originalName?: string }>} documents
+ * Convert a local PDF directly to a Gemini-ready
+ * application/pdf data URL.
+ *
+ * IMPORTANT:
+ *
+ * We intentionally do NOT render the PDF into PNG.
+ * Gemini supports PDF natively and can inspect the
+ * visual/textual contents of the document.
+ *
+ * @param {string} filePath
+ * @returns {Promise<string|null>}
+ */
+async function pdfFileToDataUrl(filePath) {
+  try {
+    const buffer = fs.readFileSync(filePath);
+
+    if (!buffer.length) {
+      return null;
+    }
+
+    return `data:application/pdf;base64,${buffer.toString("base64")}`;
+  } catch (error) {
+    console.error("[document-text] Failed to load PDF", {
+      filePath,
+      error: error?.message ?? String(error),
+    });
+
+    return null;
+  }
+}
+
+/**
+ * Prepare one uploaded document for AI verification.
+ *
+ * IMPORTANT FLOW:
+ *
+ * IMAGE
+ *   -> Gemini vision
+ *
+ * PDF
+ *   -> Gemini native PDF input
+ *
+ * DOCX/TXT/MD
+ *   -> extracted text
+ *
+ * Therefore a scanned Aadhaar PDF no longer becomes
+ * "Unreadable document" merely because pdf-parse extracted
+ * only a few characters.
+ *
+ * @param {string} filePath
+ * @param {string} mimeType
+ * @returns {Promise<{
+ *   kind: "image" | "pdf" | "text" | "unreadable",
+ *   dataUrl?: string,
+ *   text?: string,
+ *   reason?: string
+ * }>}
+ */
+export async function prepareDocumentForVerification(filePath, mimeType) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return {
+      kind: "unreadable",
+      reason: "File is missing on the server",
+    };
+  }
+
+  /*
+   * ---------------------------------------------------------
+   * IMAGE
+   * ---------------------------------------------------------
+   */
+
+  if (IMAGE_MIME_TYPES.has(mimeType)) {
+    const dataUrl = await imageFileToDataUrl(filePath, mimeType);
+
+    if (!dataUrl) {
+      return {
+        kind: "unreadable",
+        reason: "Image file could not be read",
+      };
+    }
+
+    return {
+      kind: "image",
+      dataUrl,
+    };
+  }
+
+  /*
+   * ---------------------------------------------------------
+   * PDF
+   * ---------------------------------------------------------
+   *
+   * DO NOT rely on pdf-parse for verification.
+   *
+   * Even if extraction gives 12 chars, the PDF itself may
+   * contain a perfectly readable scanned ID.
+   */
+
+  if (mimeType === "application/pdf") {
+    const dataUrl = await pdfFileToDataUrl(filePath);
+
+    if (!dataUrl) {
+      return {
+        kind: "unreadable",
+        reason: "PDF file could not be read",
+      };
+    }
+
+    return {
+      kind: "pdf",
+      dataUrl,
+    };
+  }
+
+  /*
+   * ---------------------------------------------------------
+   * TEXT DOCUMENTS
+   * ---------------------------------------------------------
+   */
+
+  const text = await extractTextFromDocument(filePath, mimeType);
+
+  const trimmed = text.trim();
+
+  if (trimmed.length >= MIN_READABLE_TEXT_CHARS) {
+    return {
+      kind: "text",
+      text: trimmed.slice(0, MAX_VERIFY_TEXT_CHARS),
+    };
+  }
+
+  return {
+    kind: "unreadable",
+    reason: "No readable content found in the file",
+  };
+}
+
+/**
+ * Build combined extracted text from multiple documents.
+ *
+ * Used by knowledge/RAG functionality.
+ *
+ * @param {Array<{
+ *   extractedText?: string,
+ *   filePath?: string,
+ *   mimeType?: string,
+ *   originalName?: string
+ * }>} documents
+ *
+ * @returns {Promise<string>}
  */
 export async function buildCombinedDocumentText(documents) {
+  if (!Array.isArray(documents) || documents.length === 0) {
+    return "";
+  }
+
   const parts = [];
 
   for (const doc of documents) {
-    let text = doc.extractedText?.trim() ?? '';
+    if (!doc) {
+      continue;
+    }
 
-    if (!text && doc.filePath) {
+    let text =
+      typeof doc.extractedText === "string" ? doc.extractedText.trim() : "";
+
+    if (!text && doc.filePath && doc.mimeType) {
       text = await extractTextFromDocument(doc.filePath, doc.mimeType);
     }
 
+    text = normalizeExtractedText(text);
+
     if (text) {
-      parts.push(`--- ${doc.originalName ?? 'Document'} ---\n${text}`);
+      parts.push(`--- ${doc.originalName ?? "Document"} ---\n${text}`);
+    } else {
+      console.warn("[document-text] No text extracted from document", {
+        originalName: doc.originalName ?? "Document",
+        mimeType: doc.mimeType,
+        filePath: doc.filePath,
+      });
     }
   }
 
-  return parts.join('\n\n').slice(0, MAX_EXTRACT_CHARS);
+  return parts.join("\n\n").slice(0, MAX_EXTRACT_CHARS);
 }
