@@ -1,0 +1,377 @@
+import dotenv from "dotenv";
+import { z } from "zod";
+
+dotenv.config();
+
+const envSchema = z.object({
+  NODE_ENV: z
+    .enum(["development", "production", "test"])
+    .default("development"),
+
+  PORT: z.coerce.number().default(5000),
+
+  MONGODB_URI: z.string().min(1),
+
+  REDIS_URL: z.string().min(1),
+
+  SESSION_SECRET: z.string().min(16),
+
+  ADMIN_CLIENT_URL: z.string().url(),
+
+  STUDENT_CLIENT_URL: z.string().url(),
+
+  /**
+   * Comma-separated extra browser origins allowed by CORS
+   * (e.g. Vercel preview URLs).
+   */
+  EXTRA_CORS_ORIGINS: z
+    .string()
+    .optional()
+    .transform((value) =>
+      value
+        ? value
+            .split(",")
+            .map((origin) => origin.trim())
+            .filter(Boolean)
+        : [],
+    ),
+
+  /**
+   * When true, allow any https://*.vercel.app origin
+   * (useful while preview domains change).
+   *
+   * Set false later and lock to ADMIN_CLIENT_URL /
+   * STUDENT_CLIENT_URL only.
+   */
+  ALLOW_VERCEL_APP_ORIGINS: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+
+  /**
+   * Public API base used in logs/docs.
+   * Railway provides PORT automatically.
+   */
+  PUBLIC_API_URL: z
+    .string()
+    .url()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  LOGIN_MAX_ATTEMPTS: z.coerce.number().default(5),
+
+  LOGIN_LOCK_MINUTES: z.coerce.number().default(15),
+
+  SESSION_INACTIVITY_HOURS: z.coerce.number().default(24),
+
+  MAX_KNOWLEDGE_FILE_MB: z.coerce.number().default(10),
+
+  MAX_KNOWLEDGE_FILES_PER_SERVICE: z.coerce.number().default(10),
+
+  // ============================================================
+  // OPENAI CONFIGURATION
+  // ============================================================
+
+  OPENAI_API_KEY: z
+    .string()
+    .optional()
+    .transform((v) => (v?.trim() ? v.trim() : undefined)),
+
+  OPENAI_MODEL: z.string().default("gpt-4o-mini"),
+
+  OPENAI_EMBEDDING_MODEL: z.string().default("text-embedding-3-small"),
+
+  /**
+   * Vision-capable model used to read image / scanned document uploads.
+   */
+  OPENAI_VISION_MODEL: z.string().default("gpt-4o"),
+
+  /**
+   * Default chat JSON timeout (ms).
+   * Large knowledge documents need more than 12s.
+   */
+  OPENAI_TIMEOUT_MS: z.coerce.number().default(60_000),
+
+  /**
+   * Service insights / catalogue extraction timeout (ms).
+   */
+  OPENAI_INSIGHTS_TIMEOUT_MS: z.coerce.number().default(120_000),
+
+  // ============================================================
+  // GEMINI CONFIGURATION
+  // ============================================================
+
+  GEMINI_API_KEY: z
+    .string()
+    .optional()
+    .transform((v) => (v?.trim() ? v.trim() : undefined)),
+
+  GEMINI_MODEL: z.string().default("gemini-3.6-flash"),
+
+  GEMINI_TIMEOUT_MS: z.coerce.number().default(60_000),
+
+  // ============================================================
+  // AI DOCUMENT VERIFICATION
+  // ============================================================
+
+  /**
+   * Master switch for AI-driven verification of
+   * application documents & eligibility.
+   */
+  AI_VERIFICATION_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+
+  /**
+   * Confidence at/above which a passing AI verdict
+   * auto-approves the step.
+   */
+  AI_VERIFY_AUTO_APPROVE_THRESHOLD: z.coerce
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.85),
+
+  /**
+   * Confidence at/above which a failing AI verdict
+   * auto-returns for correction.
+   */
+  AI_VERIFY_AUTO_REJECT_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
+
+  /**
+   * Concurrency for the AI verification worker.
+   */
+  AI_VERIFICATION_QUEUE_CONCURRENCY: z.coerce.number().default(2),
+
+  // ============================================================
+  // PINECONE / RAG
+  // ============================================================
+
+  PINECONE_API_KEY: z
+    .string()
+    .optional()
+    .transform((v) => (v?.trim() ? v.trim() : undefined)),
+
+  PINECONE_INDEX: z
+    .string()
+    .optional()
+    .transform((v) => (v?.trim() ? v.trim() : undefined)),
+
+  EMBEDDING_QUEUE_CONCURRENCY: z.coerce.number().default(2),
+
+  RAG_TOP_K: z.coerce.number().default(12),
+
+  RAG_CHUNK_SIZE: z.coerce.number().default(900),
+
+  RAG_CHUNK_OVERLAP: z.coerce.number().default(150),
+
+  STUDENT_PORTAL_INSTITUTE_ID: z.string().optional(),
+
+  // ============================================================
+  // EMAIL / SMTP
+  // ============================================================
+
+  EMAIL_NOTIFICATIONS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+
+  SMTP_HOST: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  SMTP_PORT: z.coerce.number().default(587),
+
+  SMTP_SECURE: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+
+  SMTP_USER: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  SMTP_PASS: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  SMTP_FROM: z.string().default("EduPortal <noreply@localhost>"),
+
+  EMAIL_QUEUE_CONCURRENCY: z.coerce.number().default(5),
+
+  OPERATIONS_QUEUE_CONCURRENCY: z.coerce.number().default(3),
+
+  // ============================================================
+  // GOOGLE CALENDAR / OAUTH
+  // ============================================================
+
+  GOOGLE_SERVICE_ACCOUNT_KEY_FILE: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  GOOGLE_SERVICE_ACCOUNT_EMAIL: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  GOOGLE_CALENDAR_IMPERSONATE_EMAIL: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  GOOGLE_OAUTH_CLIENT_ID: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  GOOGLE_OAUTH_CLIENT_SECRET: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  GOOGLE_OAUTH_REFRESH_TOKEN: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  GOOGLE_OAUTH_REDIRECT_URI: z
+    .string()
+    .default("http://127.0.0.1:8765/oauth2callback")
+    .transform((value) =>
+      value?.trim() ? value.trim() : "http://127.0.0.1:8765/oauth2callback",
+    ),
+
+  GOOGLE_CALENDAR_ID: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  GOOGLE_CALENDAR_TIMEZONE: z.string().default("Asia/Kolkata"),
+
+  // ============================================================
+  // CACHE
+  // ============================================================
+
+  CACHE_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+
+  CACHE_DEFAULT_TTL_HOURS: z.coerce.number().min(1).default(12),
+
+  // ============================================================
+  // RAZORPAY
+  // ============================================================
+
+  RAZORPAY_KEY_ID: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  RAZORPAY_KEY_SECRET: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  // ============================================================
+  // METRICS
+  // ============================================================
+
+  /**
+   * Optional bearer token protecting the Prometheus
+   * /metrics endpoint. Open when unset.
+   */
+  METRICS_TOKEN: z
+    .string()
+    .optional()
+    .transform((value) => (value?.trim() ? value.trim() : undefined)),
+
+  // ============================================================
+  // EXPORT / ERP
+  // ============================================================
+
+  /**
+   * Max rows returned in a single admin record export
+   * (CSV/XLSX/JSON).
+   */
+  EXPORT_MAX_ROWS: z.coerce.number().min(1).default(10_000),
+
+  /**
+   * Max page size for the ERP incremental sync API.
+   */
+  ERP_SYNC_MAX_PAGE_SIZE: z.coerce.number().min(1).max(1000).default(200),
+
+  // ============================================================
+  // HEALTH MONITOR
+  // ============================================================
+
+  /**
+   * Toggle the periodic dependency health monitor.
+   */
+  HEALTH_MONITOR_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+
+  /**
+   * Interval (ms) between background dependency health checks.
+   */
+  HEALTH_MONITOR_INTERVAL_MS: z.coerce.number().min(5_000).default(60_000),
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error(
+    "Invalid environment variables:",
+    parsed.error.flatten().fieldErrors,
+  );
+
+  process.exit(1);
+}
+
+export const env = parsed.data;
+
+// ============================================================
+// CORS CONFIGURATION
+// ============================================================
+
+export const CLIENT_ORIGINS = [
+  env.ADMIN_CLIENT_URL.replace(/\/$/, ""),
+  env.STUDENT_CLIENT_URL.replace(/\/$/, ""),
+  ...(env.EXTRA_CORS_ORIGINS ?? []).map((origin) => origin.replace(/\/$/, "")),
+];
+
+// Allow Vercel preview deployments
+const VERCEL_APP_ORIGIN = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i;
+
+/**
+ * Check whether a browser origin is allowed by CORS.
+ *
+ * @param {string | undefined} origin
+ */
+export function isAllowedOrigin(origin) {
+  if (!origin) return true;
+
+  const normalized = origin.replace(/\/$/, "");
+
+  if (CLIENT_ORIGINS.includes(normalized)) {
+    return true;
+  }
+
+  if (env.ALLOW_VERCEL_APP_ORIGINS && VERCEL_APP_ORIGIN.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}

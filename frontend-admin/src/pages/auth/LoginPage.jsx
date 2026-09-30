@@ -1,0 +1,267 @@
+import { useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import { toast } from "sonner";
+import { Eye, EyeOff, Mail, Lock, ArrowRight, Loader2 } from "lucide-react";
+import { AuthLayout } from "@/components/auth/AuthLayout";
+import { authApi } from "@/api/auth.api";
+import { useAuthStore } from "@/store/auth.store";
+import { cn } from "@/lib/utils";
+import {
+  PORTAL_BRAND,
+  forgotPasswordPathForPortal,
+  getAuthPortal,
+} from "@/constants/portalBranding";
+
+const loginSchema = z.object({
+  email: z.string().email("Enter a valid email address"),
+  password: z.string().min(1, "Password is required"),
+});
+
+export function LoginPage() {
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const portal = getAuthPortal(pathname);
+  const brand = PORTAL_BRAND[portal];
+  const setUser = useAuthStore((s) => s.setUser);
+  const [submitting, setSubmitting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const isStaffPortal = portal === "staff";
+
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { email: "", password: "" },
+  });
+
+  const onSubmit = async (values) => {
+    setSubmitting(true);
+    try {
+      const { data } = await authApi.login(values);
+      const user = data.data.user;
+      setUser(user);
+      if (user.role === "admin" && !user.institute?.setupCompleted) {
+        navigate("/setup/institute", { replace: true });
+      } else if (user.role === "admin") {
+        navigate("/admin/dashboard", { replace: true });
+      } else {
+        navigate("/staff/dashboard", { replace: true });
+      }
+    } catch (err) {
+      toast.error(err.message || "Invalid email or password");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <AuthLayout
+      portal={portal}
+      title="Welcome back"
+      subtitle={
+        isStaffPortal
+          ? "Sign in to your staff account to continue"
+          : "Sign in to your admin account to continue"
+      }
+      heroTitle={
+        isStaffPortal
+          ? "Your staff workspace, ready when you are."
+          : "Education institute administration, simplified."
+      }
+      heroSubtitle={
+        isStaffPortal
+          ? "Review applications, manage queues, and support students from one structured workspace."
+          : "Configure your institute, manage staff, and run all services in one structured workspace."
+      }
+    >
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-5" noValidate>
+        <FieldWrapper
+          id="email"
+          label="Email Address"
+          icon={Mail}
+          error={errors.email?.message}
+        >
+          <input
+            id="email"
+            type="email"
+            autoComplete="email"
+            placeholder="you@institute.edu"
+            {...register("email")}
+            className={cn(InputBase, errors.email ? InputError : InputNormal)}
+          />
+        </FieldWrapper>
+
+        <FieldWrapper
+          id="password"
+          label="Password"
+          icon={Lock}
+          error={errors.password?.message}
+          rightSlot={
+            <button
+              type="button"
+              tabIndex={-1}
+              onClick={() => setShowPassword((v) => !v)}
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 text-icon-disabled hover:text-primary transition-colors"
+              aria-label={showPassword ? "Hide password" : "Show password"}
+            >
+              {showPassword ? (
+                <EyeOff className="h-[1.05rem] w-[1.05rem]" strokeWidth={1.8} />
+              ) : (
+                <Eye className="h-[1.05rem] w-[1.05rem]" strokeWidth={1.8} />
+              )}
+            </button>
+          }
+        >
+          <input
+            id="password"
+            type={showPassword ? "text" : "password"}
+            autoComplete="current-password"
+            placeholder="Enter your password"
+            {...register("password")}
+            className={cn(
+              InputBase,
+              "pr-11",
+              errors.password ? InputError : InputNormal,
+            )}
+          />
+        </FieldWrapper>
+
+        <div className="flex justify-end -mt-2">
+          <Link
+            to={forgotPasswordPathForPortal(portal)}
+            className="rounded-full px-2 py-1 text-[0.75rem] font-semibold text-primary transition-colors hover:bg-mint-bg hover:text-heading"
+          >
+            Forgot password?
+          </Link>
+        </div>
+
+        <SubmitButton
+          submitting={submitting}
+          label="Sign in"
+          loadingLabel="Signing in…"
+        />
+      </form>
+
+      {!isStaffPortal && (
+        <>
+          <div className="relative flex items-center gap-3 my-1">
+            <div className="h-px flex-1 bg-divider" />
+            <span className="text-[0.68rem] font-semibold text-sage-muted-2 tracking-[0.12em] uppercase">
+              or
+            </span>
+            <div className="h-px flex-1 bg-divider" />
+          </div>
+
+          <p className="text-center text-[0.85rem] text-text-muted">
+            New to {brand.name}?{" "}
+            <Link
+              to="/signup"
+              className="font-semibold text-primary transition-colors hover:text-heading"
+            >
+              Create an account
+            </Link>
+          </p>
+        </>
+      )}
+
+      <p className="text-center text-[0.82rem] text-text-muted pt-1">
+        {isStaffPortal ? (
+          <>
+            Institute admin?{" "}
+            <Link
+              to="/login"
+              className="font-semibold text-primary transition-colors hover:text-heading"
+            >
+              {PORTAL_BRAND.admin.name}
+            </Link>
+          </>
+        ) : (
+          <>
+            Staff member?{" "}
+            <Link
+              to="/staff/login"
+              className="font-semibold text-primary transition-colors hover:text-heading"
+            >
+              {PORTAL_BRAND.staff.name}
+            </Link>
+          </>
+        )}
+      </p>
+    </AuthLayout>
+  );
+}
+
+export function FieldWrapper({
+  id,
+  label,
+  icon: Icon,
+  error,
+  rightSlot,
+  children,
+}) {
+  return (
+    <div className="space-y-1.5">
+      <label
+        htmlFor={id}
+        className="block text-[0.72rem] font-bold tracking-[0.1em] text-label uppercase"
+      >
+        {label}
+      </label>
+      <div className="relative group">
+        <Icon
+          className="pointer-events-none absolute left-3.5 top-1/2 h-[1rem] w-[1rem] -translate-y-1/2 text-mint transition-colors duration-200 group-focus-within:text-primary"
+          strokeWidth={1.9}
+        />
+        {children}
+        {rightSlot}
+      </div>
+      {error && (
+        <p className="flex items-center gap-1.5 text-[0.72rem] text-red-500 font-medium mt-1">
+          <span className="inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center rounded-full bg-red-100 text-[9px] font-bold text-red-500">
+            !
+          </span>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function SubmitButton({ submitting, label, loadingLabel }) {
+  return (
+    <button
+      type="submit"
+      disabled={submitting}
+      className={cn(
+        "mt-1 flex h-11 w-full items-center justify-center gap-2 rounded-xl text-[0.875rem] font-semibold tracking-wide transition-all duration-200",
+        submitting
+          ? "cursor-not-allowed bg-loading text-white"
+          : "bg-primary text-white hover:bg-primary-hover active:scale-[0.988] shadow-[0_2px_18px_rgba(10,102,64,0.3)]",
+      )}
+    >
+      {submitting ? (
+        <>
+          <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2} />
+          {loadingLabel}
+        </>
+      ) : (
+        <>
+          {label}
+          <ArrowRight className="h-4 w-4" strokeWidth={2.5} />
+        </>
+      )}
+    </button>
+  );
+}
+
+export const InputBase =
+  "h-11 w-full rounded-xl border pl-10 pr-4 text-[0.875rem] text-ink placeholder-placeholder outline-none transition-all duration-150 font-normal";
+export const InputNormal =
+  "bg-input-bg border-input-border hover:border-mint hover:bg-input-hover-bg focus:border-primary focus:bg-white focus:ring-4 focus:ring-primary/8";
+export const InputError =
+  "bg-red-50/60 border-red-300 focus:border-red-400 focus:ring-4 focus:ring-red-400/10";

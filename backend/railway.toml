@@ -1,0 +1,13 @@
+# Use Nixpacks (more reliable than Docker for this Node monorepo service).
+# In Railway UI: Settings → Root Directory = backend
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm ci --omit=dev --legacy-peer-deps"
+
+[deploy]
+startCommand = "npm start"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

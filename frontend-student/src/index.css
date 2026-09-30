@@ -1,0 +1,283 @@
+@import 'tailwindcss';
+
+/*
+  ============================================================
+  THEME TOKENS
+  ------------------------------------------------------------
+  This is the DEFAULT color theme (the original palette this
+  project shipped with). Every color used anywhere in the app
+  is driven by one of these CSS variables, so the whole product
+  can be re-themed at runtime by overriding these variables
+  (see src/theme/ThemeProvider.jsx) without touching component
+  code. Do not hardcode hex colors in components — use one of
+  the utility classes these variables generate instead
+  (e.g. bg-primary, text-heading, border-divider).
+  ============================================================
+*/
+@theme {
+  --font-sans: 'Inter', system-ui, sans-serif;
+
+  /* ---- semantic aliases (used broadly across the app) ---- */
+  --color-background: #F4FAF7;
+  --color-foreground: #052E1C;
+  --color-surface: #FFFFFF;
+  --color-muted: #4B6358;
+  --color-subtle: #4B6358;
+  --color-border: #E2EEE8;
+  --color-accent: #D1FAE5;
+  --color-hero: #052E1C;
+  --color-primary: #0A6640;
+  --color-primary-foreground: #FFFFFF;
+  --color-destructive: #EF4444;
+  --color-warning: #92400E;
+  --color-warning-surface: #FFFBEB;
+  --color-insight-surface: #EFF6FF;
+  --color-insight-border: #BFDBFE;
+  --color-insight-foreground: #1E40AF;
+  --color-sage: #10B981;
+  --color-sage-light: #A7F3D0;
+  --color-slate: #4B6358;
+  --color-forest: #052E1C;
+  --color-mist: #F4FAF7;
+  --color-success: #16A34A;
+  --color-success-bg: #ECFDF5;
+  --color-success-border: #BBF7D0;
+  --color-info: #2563EB;
+  --color-error-border: #FECACA;
+
+  /* ---- full design palette ---- */
+  --color-primary: #0A6640;
+  --color-label: #4B6358;
+  --color-heading: #052E1C;
+  --color-divider: #E2EEE8;
+  --color-input-border: #C4E8D4;
+  --color-input-bg: #F0FAF5;
+  --color-mint: #6EE7B7;
+  --color-primary-bright: #10B981;
+  --color-row-hover: #F9FCFB;
+  --color-primary-hover: #084F31;
+  --color-text-muted: #6B7280;
+  --color-error-text: #B91C1C;
+  --color-forest-mid: #3D6B35;
+  --color-icon-disabled: #9CA3AF;
+  --color-warning-text: #92400E;
+  --color-mint-pale: #D1FAE5;
+  --color-error-bg: #FEF2F2;
+  --color-error-border: #FECACA;
+  --color-placeholder: #A8BDB5;
+  --color-page-bg: #F4FAF7;
+  --color-mint-light: #A7F3D0;
+  --color-sage-muted: #9BAE99;
+  --color-info-text: #1D4ED8;
+  --color-warning-bg: #FFFBEB;
+  --color-warning-border: #FDE68A;
+  --color-mist-green: #D4E5D0;
+  --color-surface-tint: #F6FAF5;
+  --color-forest-deep: #1A2E16;
+  --color-border-soft: #E8EDE6;
+  --color-info-border: #BFDBFE;
+  --color-info-bg: #EFF6FF;
+  --color-error: #EF4444;
+  --color-mint-bg: #E6F7EF;
+  --color-bg-faint: #FAFBFA;
+  --color-input-hover-bg: #EDFAF3;
+  --color-sage-text: #6B7C69;
+  --color-mint-border: #D1EEE0;
+  --color-error-border-strong: #FCA5A5;
+  --color-gray-bg: #F3F4F6;
+  --color-success-bg: #ECFDF5;
+  --color-warning-chip: #FEF3C7;
+  --color-mist-alt: #EEF4EC;
+  --color-amber-text: #92561A;
+  --color-error-chip: #FEE2E2;
+  --color-loading: #34D399;
+  --color-success-text: #059669;
+  --color-mist-soft: #F4F7F3;
+  --color-panel-border: #B6DFC8;
+  --color-sand-chip: #F5DEC2;
+  --color-cream: #FDFAF6;
+  --color-error-text-strong: #991B1B;
+  --color-sage-border: #C4D4C2;
+  --color-forest-mid-2: #4A6448;
+  --color-sage-light-2: #B8D4B2;
+  --color-forest-strong: #2D5427;
+  --color-error-text-deep: #7F1D1D;
+  --color-info-text-deep: #1E40AF;
+  --color-success-border: #BBF7D0;
+  --color-emerald-mid: #3D7A5C;
+  --color-mist-faint: #F7F8F6;
+  --color-bg-faint-2: #FAFCFB;
+  --color-amber-solid: #D97706;
+  --color-mint-bg-2: #E8F5EE;
+  --color-info-bg-2: #DBEAFE;
+  --color-info-solid: #3B82F6;
+  --color-amber-solid-2: #F59E0B;
+  --color-amber-text-deep: #B45309;
+  --color-amber-light: #FCD34D;
+  --color-teal-solid: #14B8A6;
+  --color-purple-solid: #8B5CF6;
+  --color-gray-border: #D1D5DB;
+  --color-white: #FFF;
+  --color-mist-alt-2: #E8F0EC;
+  --color-error-solid: #DC2626;
+  --color-brown-text: #7A6040;
+  --color-success-text-deep: #047857;
+  --color-teal-text-deep: #0F766E;
+  --color-purple-text-deep: #6D28D9;
+  --color-slate-text: #334155;
+  --color-info-solid-2: #2563EB;
+  --color-gray-border-2: #E5E7EB;
+  --color-mint-bg-3: #E3F5EC;
+  --color-info-text-deepest: #1E3A8A;
+  --color-mist-green-2: #D5E5DE;
+  --color-page-bg-2: #F5FAF7;
+  --color-forest-deepest: #063D25;
+  --color-primary-deep: #0B7344;
+  --color-mint-chip: #C6F0DA;
+  --color-cream-2: #FDF6EC;
+  --color-bg-faint-3: #FAFCF9;
+  --color-peach-chip: #F5C4B3;
+  --color-cream-3: #FDFAF9;
+  --color-bg-faint-4: #FAFBF9;
+  --color-blue-faint: #F8FBFF;
+  --color-info-light: #93C5FD;
+  --color-teal-light: #99F6E4;
+  --color-teal-chip: #CCFBF1;
+  --color-teal-mid: #5EEAD4;
+  --color-teal-bg: #F0FDFA;
+  --color-purple-light: #DDD6FE;
+  --color-purple-bg: #EDE9FE;
+  --color-purple-mid: #C4B5FD;
+  --color-purple-faint: #F5F3FF;
+  --color-white-solid: #FFFFFF;
+  --color-sage-muted-2: #A0B8AC;
+  --color-ink: #111827;
+  --color-mint-border-2: #D8E8E0;
+  --color-mist-faint-2: #F7FBF9;
+  --color-forest-mid-3: #35604D;
+  --color-sage-text-2: #6B7F75;
+  --color-success-bg-2: #F0FDF4;
+  --color-success-solid: #16A34A;
+  --color-success-text-deepest: #166534;
+  --color-success-solid-deep: #15803D;
+  --color-mint-mid: #A7E3C4;
+  --color-mist-alt-3: #EEF5F1;
+  --color-bg-faint-5: #FAFDFB;
+  --color-mint-border-3: #D8ECE2;
+
+  --scrollbar-size: 5px;
+  --scrollbar-brand-dark: var(--color-primary-hover);
+  --scrollbar-brand-light: var(--color-primary-bright);
+  --scrollbar-thumb: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--scrollbar-brand-light) 62%, transparent),
+    color-mix(in srgb, var(--scrollbar-brand-dark) 62%, transparent)
+  );
+  --scrollbar-thumb-hover: linear-gradient(
+    180deg,
+    var(--scrollbar-brand-light),
+    var(--scrollbar-brand-dark)
+  );
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    @apply min-h-screen bg-background font-sans text-foreground antialiased;
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-mint-light) 80%, var(--color-mint));
+    color: var(--color-heading);
+  }
+}
+
+/* Scrollbar — unlayered so native track styling is fully overridden (Windows) */
+html,
+body,
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-brand-dark) transparent;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent !important;
+}
+
+html::-webkit-scrollbar-track,
+body::-webkit-scrollbar-track,
+*::-webkit-scrollbar-track,
+html::-webkit-scrollbar-track-piece,
+body::-webkit-scrollbar-track-piece,
+*::-webkit-scrollbar-track-piece,
+html::-webkit-scrollbar-track-piece:start,
+body::-webkit-scrollbar-track-piece:start,
+*::-webkit-scrollbar-track-piece:start,
+html::-webkit-scrollbar-track-piece:end,
+body::-webkit-scrollbar-track-piece:end,
+*::-webkit-scrollbar-track-piece:end {
+  background: transparent !important;
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+html::-webkit-scrollbar-thumb,
+body::-webkit-scrollbar-thumb,
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 9999px;
+  border: none;
+  box-shadow: none;
+}
+
+html::-webkit-scrollbar-thumb:hover,
+body::-webkit-scrollbar-thumb:hover,
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+html::-webkit-scrollbar-button,
+body::-webkit-scrollbar-button,
+*::-webkit-scrollbar-button,
+html::-webkit-scrollbar-corner,
+body::-webkit-scrollbar-corner,
+*::-webkit-scrollbar-corner,
+html::-webkit-scrollbar-resizer,
+body::-webkit-scrollbar-resizer,
+*::-webkit-scrollbar-resizer {
+  display: none;
+  width: 0;
+  height: 0;
+  background: transparent !important;
+}
+
+[data-sonner-toaster][data-x-position='center'] {
+  width: min(26rem, calc(100vw - 1.5rem));
+}
+
+[data-sonner-toast] {
+  width: min(26rem, calc(100vw - 1.5rem)) !important;
+  align-items: flex-start !important;
+}
+
+[data-sonner-toast] [data-title],
+[data-sonner-toast] [data-description] {
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: unset !important;
+}

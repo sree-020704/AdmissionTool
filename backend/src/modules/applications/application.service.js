@@ -1,0 +1,2031 @@
+import fs from 'fs/promises';
+import { createReadStream } from 'fs';
+
+import { Application } from './application.model.js';
+import { Service } from '../services/service.model.js';
+import { Offering } from '../offerings/offering.model.js';
+import { Institute } from '../institutes/institute.model.js';
+import { User } from '../users/user.model.js';
+
+import { AppError } from '../../core/utils/AppError.js';
+import { APPLICATION_STATUS } from '../../shared/enums/application.enums.js';
+import { ROLES } from '../../shared/constants/roles.js';
+
+import {
+  notifyApplicationAssigned,
+  notifyApplicationStatusChange,
+} from '../../shared/templates/applicationEmails.js';
+
+import { cachedRead } from '../../shared/helpers/cachedRead.helper.js';
+import { cacheNs } from '../../shared/constants/cacheKeys.js';
+import { flushInstituteReadCache } from '../../shared/helpers/cacheInvalidation.helper.js';
+
+import {
+  refreshApplicationRuntime,
+  formatRuntimeFields,
+  extendApplicationSla,
+  escalateSlaBreach,
+} from '../../shared/services/applicationRuntime.service.js';
+
+import { createNotification } from '../notifications/notification.service.js';
+
+import { emitApplicationUpdated } from '../../shared/helpers/realtime.helper.js';
+
+import {
+  findApplicationDocument,
+  formatDocumentRequirements,
+  getDocumentUploadProgress,
+} from '../../shared/helpers/applicationDocument.helper.js';
+
+import {
+  applyWorkflowOutcome,
+  canUserActOnWorkflowStep,
+  findStepOutcome,
+  formatWorkflowForClient,
+  getCurrentWorkflowStep,
+  getWorkflowSteps,
+} from '../../shared/helpers/workflowExecution.helper.js';
+
+import { settleAiWorkflowSteps } from '../ai-verification/ai-step.helper.js';
+import { enqueueApplicationAiVerification } from '../../core/queues/ai-verification.queue.js';
+
+import {
+  AiDecision,
+  AI_DECISION_HANDLER,
+} from '../ai-verification/aiDecision.model.js';
+
+import { OUTCOME_TYPE } from '../../shared/enums/workflow.enums.js';
+import { isSlaOverdue } from '../../shared/helpers/sla.helper.js';
+
+import {
+  getDocumentRequirementsForAdmissionType,
+  normalizeAdmissionType,
+  ADMISSION_TYPES,
+} from '../../shared/helpers/admissionType.helper.js';
+
+
+/* ============================================================
+   STATUS CONFIGURATION
+   ============================================================ */
+
+const STATUS_TRANSITIONS = {
+  [APPLICATION_STATUS.SUBMITTED]: [
+    APPLICATION_STATUS.IN_REVIEW,
+    APPLICATION_STATUS.ADMITTED,
+    APPLICATION_STATUS.REJECTED,
+  ],
+
+  [APPLICATION_STATUS.IN_REVIEW]: [
+    APPLICATION_STATUS.ADMITTED,
+    APPLICATION_STATUS.REJECTED,
+  ],
+};
+
+const WORKFLOW_ACTION_STATUSES = new Set([
+  APPLICATION_STATUS.SUBMITTED,
+  APPLICATION_STATUS.IN_REVIEW,
+  APPLICATION_STATUS.PENDING_AI_REVIEW,
+]);
+
+
+/* ============================================================
+   ASSIGNEE FORMAT
+   ============================================================ */
+
+function formatAssignee(user) {
+  if (!user) {
+    return null;
+  }
+
+  return {
+    id: user._id.toString(),
+    name: user.name,
+    email: user.email,
+    staffRole: user.staffRole ?? null,
+  };
+}
+
+
+/* ============================================================
+   APPLICATION SUMMARY
+   ============================================================ */
+
+function formatApplicationSummary(
+  application,
+  service,
+  offering,
+  assignee,
+) {
+  return {
+    id: application._id.toString(),
+
+    status: application.status,
+
+    applicantName: application.applicantName,
+
+    applicantEmail: application.applicantEmail,
+
+    applicantDetails: application.applicantDetails ?? [],
+
+    serviceId: application.serviceId.toString(),
+
+    serviceName: service?.name ?? 'Unknown service',
+
+    offeringId: application.offeringId.toString(),
+
+    offeringName: offering?.name ?? 'Unknown option',
+
+    documentCount: application.documents?.length ?? 0,
+
+    assignedTo: formatAssignee(assignee),
+
+    assignedAt: application.assignedAt ?? null,
+
+    slaBreached: Boolean(application.slaBreached),
+
+    slaOverdue: isSlaOverdue(application.currentStepDueAt),
+
+    createdAt: application.createdAt,
+
+    updatedAt: application.updatedAt,
+  };
+}
+
+
+/* ============================================================
+   APPLICATION DETAIL
+   ============================================================ */
+
+/**
+ * IMPORTANT FIX:
+ *
+ * Admin must calculate document progress using the same
+ * admission-specific document requirements that were used
+ * by the student portal.
+ *
+ * Previously this function directly used:
+ *
+ *   offering.documentRequirements
+ *
+ * That can cause a mismatch when the application is configured
+ * for REGULAR / TRANSFER admission and the actual requirements
+ * live in documentsByAdmissionType.
+ */
+function formatApplicationDetail(
+  application,
+  service,
+  offering,
+  assignee,
+  user = null,
+) {
+  let progress = null;
+
+  let documentRequirements = [];
+
+  if (offering) {
+    const admissionType = normalizeAdmissionType(
+      application.admissionType,
+    );
+
+    /*
+     * IMPORTANT:
+     * Resolve the exact requirements for this application's
+     * admission type.
+     */
+    documentRequirements =
+      getDocumentRequirementsForAdmissionType(
+        offering,
+        admissionType,
+      );
+
+    /*
+     * Build a temporary offering object containing the
+     * admission-specific requirements.
+     *
+     * getDocumentUploadProgress() then compares the
+     * application.documents[].requirementId against these
+     * exact requirements.
+     */
+    const offeringForProgress = {
+      ...offering.toObject(),
+
+      documentRequirements,
+    };
+
+    progress = getDocumentUploadProgress(
+      offeringForProgress,
+      application,
+    );
+  }
+
+  const workflowSteps = getWorkflowSteps(application);
+
+  const workflow =
+    workflowSteps.length > 0
+      ? formatWorkflowForClient(
+          application,
+          user ?? { role: ROLES.ADMIN },
+        )
+      : null;
+
+  return {
+    id: application._id.toString(),
+
+    status: application.status,
+
+    applicantName: application.applicantName,
+
+    applicantEmail: application.applicantEmail,
+
+    applicantDetails: application.applicantDetails ?? [],
+
+    serviceId: application.serviceId.toString(),
+
+    serviceName: service?.name ?? 'Unknown service',
+
+    offeringId: application.offeringId.toString(),
+
+    offeringName: offering?.name ?? 'Unknown option',
+
+    currentStepId: application.currentStepId ?? null,
+
+    admissionType:
+      normalizeAdmissionType(application.admissionType),
+
+    assignedTo: formatAssignee(assignee),
+
+    assignedAt: application.assignedAt ?? null,
+
+    createdAt: application.createdAt,
+
+    updatedAt: application.updatedAt,
+
+    /*
+     * IMPORTANT:
+     * Return the same admission-specific requirements
+     * used to calculate progress.
+     */
+    documentRequirements: formatDocumentRequirements(
+      documentRequirements,
+    ),
+
+    /*
+     * Return uploaded documents.
+     */
+    documents: (application.documents ?? []).map(
+      (document) => ({
+        id: document._id.toString(),
+
+        requirementId:
+          document.requirementId.toString(),
+
+        requirementName:
+          document.requirementName,
+
+        originalName:
+          document.originalName,
+
+        mimeType:
+          document.mimeType,
+
+        sizeBytes:
+          document.sizeBytes,
+
+        uploadedAt:
+          document.uploadedAt,
+
+        verification:
+          document.verification ?? null,
+      }),
+    ),
+
+    /*
+     * Document progress.
+     */
+    requiredDocumentCount:
+      progress?.requiredDocumentCount ?? 0,
+
+    uploadedRequiredCount:
+      progress?.uploadedRequiredCount ?? 0,
+
+    missingRequiredDocuments:
+      progress?.missingRequiredDocuments ?? [],
+
+    documentsComplete:
+      progress?.documentsComplete ?? true,
+
+    workflow,
+
+    correctionNote:
+      application.correctionNote ?? '',
+
+    correctionRequiredDocuments:
+      application.correctionRequiredDocuments ?? [],
+
+    ...formatRuntimeFields(application),
+  };
+}
+
+
+/* ============================================================
+   GET APPLICATION
+   ============================================================ */
+
+async function getInstituteApplication(
+  instituteId,
+  applicationId,
+) {
+  const application = await Application.findOne({
+    _id: applicationId,
+    instituteId,
+  });
+
+  if (!application) {
+    throw new AppError(
+      'Application not found',
+      404,
+    );
+  }
+
+  return application;
+}
+
+
+/* ============================================================
+   AI DECISIONS
+   ============================================================ */
+
+/**
+ * Latest AI verification decisions per workflow step.
+ * Intake pre-screen decisions are excluded.
+ */
+async function loadApplicationAiDecisions(
+  instituteId,
+  applicationId,
+) {
+  const decisions = await AiDecision.find({
+    instituteId,
+
+    applicationId,
+
+    handler: {
+      $ne:
+        AI_DECISION_HANDLER.INTAKE_AUTHORIZATION,
+    },
+  })
+    .sort({
+      createdAt: -1,
+    })
+    .limit(20)
+    .lean();
+
+  return decisions.map((decision) => ({
+    id: decision._id.toString(),
+
+    stepId:
+      decision.stepId ?? null,
+
+    stepName:
+      decision.stepName ?? '',
+
+    handler:
+      decision.handler,
+
+    action:
+      decision.action,
+
+    verdict:
+      decision.verdict ?? null,
+
+    confidence:
+      decision.confidence ?? null,
+
+    summary:
+      decision.summary ?? '',
+
+    issues:
+      decision.issues ?? [],
+
+    perDocument:
+      decision.perDocument ?? [],
+
+    extractedFields:
+      decision.extractedFields ?? [],
+
+    createdAt:
+      decision.createdAt,
+  }));
+}
+
+
+/* ============================================================
+   STAFF APPLICATION
+   ============================================================ */
+
+async function getAssignedApplication(
+  instituteId,
+  applicationId,
+  staffUserId,
+) {
+  const application = await Application.findOne({
+    _id: applicationId,
+
+    instituteId,
+
+    assignedTo: staffUserId,
+  });
+
+  if (!application) {
+    throw new AppError(
+      'Assigned request not found',
+      404,
+    );
+  }
+
+  return application;
+}
+
+
+/* ============================================================
+   APPLICATION CONTEXT
+   ============================================================ */
+
+async function loadApplicationContext(
+  application,
+  instituteId,
+) {
+  const [
+    service,
+    offering,
+    institute,
+  ] = await Promise.all([
+    Service.findOne({
+      _id: application.serviceId,
+      instituteId,
+    }).select('name'),
+
+    /*
+     * IMPORTANT:
+     *
+     * We load the full admission-specific document
+     * configuration fields here.
+     *
+     * Previously only:
+     *
+     *   name documentRequirements
+     *
+     * were selected.
+     *
+     * That can prevent
+     * getDocumentRequirementsForAdmissionType()
+     * from seeing documentsByAdmissionType.
+     */
+    Offering.findOne({
+      _id: application.offeringId,
+      instituteId,
+    }).select(
+      'name documentRequirements documentsByAdmissionType admissionTypeConfig',
+    ),
+
+    Institute.findById(instituteId).select('name'),
+  ]);
+
+  return {
+    service,
+
+    offering,
+
+    instituteName:
+      institute?.name ??
+      'Your institute',
+
+    serviceName:
+      service?.name ??
+      'Service',
+
+    offeringName:
+      offering?.name ??
+      'Option',
+  };
+}
+
+
+/* ============================================================
+   ASSIGNEE MAP
+   ============================================================ */
+
+async function loadAssigneeMap(
+  applications,
+) {
+  const assigneeIds = [
+    ...new Set(
+      applications
+        .map(
+          (application) =>
+            application.assignedTo?.toString(),
+        )
+        .filter(Boolean),
+    ),
+  ];
+
+  if (!assigneeIds.length) {
+    return new Map();
+  }
+
+  const assignees = await User.find({
+    _id: {
+      $in: assigneeIds,
+    },
+  }).select(
+    'name email staffRole',
+  );
+
+  return new Map(
+    assignees.map(
+      (user) => [
+        user._id.toString(),
+        user,
+      ],
+    ),
+  );
+}
+
+
+/* ============================================================
+   LOAD ASSIGNEE
+   ============================================================ */
+
+async function loadAssignee(
+  application,
+) {
+  if (!application.assignedTo) {
+    return null;
+  }
+
+  return User.findById(
+    application.assignedTo,
+  ).select(
+    'name email staffRole',
+  );
+}
+
+
+/* ============================================================
+   APPLICATION FILTER
+   ============================================================ */
+
+function buildApplicationFilter(
+  instituteId,
+  query,
+  extra = {},
+) {
+  const filter = {
+    instituteId,
+    ...extra,
+  };
+
+  if (query.status === 'all') {
+    // Include every status.
+  } else if (query.status) {
+    filter.status = query.status;
+  } else {
+    filter.status = {
+      $nin: [
+        APPLICATION_STATUS.DRAFT,
+        APPLICATION_STATUS.PENDING_AUTHORIZATION,
+      ],
+    };
+  }
+
+  if (query.serviceId) {
+    filter.serviceId =
+      query.serviceId;
+  }
+
+  if (query.offeringId) {
+    filter.offeringId =
+      query.offeringId;
+  }
+
+  if (query.staffId) {
+    filter.assignedTo =
+      query.staffId;
+  }
+
+  if (query.slaBreached === 'true') {
+    filter.slaBreached = true;
+  } else if (
+    query.slaBreached === 'false'
+  ) {
+    filter.slaBreached = {
+      $ne: true,
+    };
+  }
+
+  if (query.search) {
+    const search =
+      query.search.trim();
+
+    filter.$or = [
+      {
+        applicantName: {
+          $regex: search,
+          $options: 'i',
+        },
+      },
+
+      {
+        applicantEmail: {
+          $regex: search,
+          $options: 'i',
+        },
+      },
+    ];
+  }
+
+  return filter;
+}
+
+
+/* ============================================================
+   PAGINATION
+   ============================================================ */
+
+async function paginateApplications(
+  filter,
+  query,
+) {
+  const sort = {
+    [query.sortBy]:
+      query.sortOrder === 'asc'
+        ? 1
+        : -1,
+  };
+
+  const skip =
+    (query.page - 1) *
+    query.limit;
+
+  const [
+    applications,
+    total,
+  ] = await Promise.all([
+    Application.find(filter)
+      .sort(sort)
+      .skip(skip)
+      .limit(query.limit),
+
+    Application.countDocuments(
+      filter,
+    ),
+  ]);
+
+  const serviceIds = [
+    ...new Set(
+      applications.map(
+        (item) =>
+          item.serviceId.toString(),
+      ),
+    ),
+  ];
+
+  const offeringIds = [
+    ...new Set(
+      applications.map(
+        (item) =>
+          item.offeringId.toString(),
+      ),
+    ),
+  ];
+
+  const [
+    services,
+    offerings,
+    assigneeMap,
+  ] = await Promise.all([
+    Service.find({
+      _id: {
+        $in: serviceIds,
+      },
+    }).select('name'),
+
+    Offering.find({
+      _id: {
+        $in: offeringIds,
+      },
+    }).select('name'),
+
+    loadAssigneeMap(
+      applications,
+    ),
+  ]);
+
+  const serviceMap =
+    new Map(
+      services.map(
+        (item) => [
+          item._id.toString(),
+          item,
+        ],
+      ),
+    );
+
+  const offeringMap =
+    new Map(
+      offerings.map(
+        (item) => [
+          item._id.toString(),
+          item,
+        ],
+      ),
+    );
+
+  return {
+    applications:
+      applications.map(
+        (application) =>
+          formatApplicationSummary(
+            application,
+
+            serviceMap.get(
+              application.serviceId.toString(),
+            ),
+
+            offeringMap.get(
+              application.offeringId.toString(),
+            ),
+
+            assigneeMap.get(
+              application.assignedTo?.toString(),
+            ),
+          ),
+      ),
+
+    pagination: {
+      page: query.page,
+
+      limit: query.limit,
+
+      total,
+
+      totalPages:
+        Math.max(
+          1,
+          Math.ceil(
+            total /
+              query.limit,
+          ),
+        ),
+
+      hasNextPage:
+        query.page *
+          query.limit <
+        total,
+
+      hasPrevPage:
+        query.page > 1,
+    },
+  };
+}
+
+
+/* ============================================================
+   ADMIN APPLICATION LIST
+   ============================================================ */
+
+export async function listApplications(
+  instituteId,
+  query,
+) {
+  return cachedRead(
+    cacheNs.APPLICATIONS_LIST,
+
+    [
+      instituteId,
+      query,
+    ],
+
+    () =>
+      paginateApplications(
+        buildApplicationFilter(
+          instituteId,
+          query,
+        ),
+
+        query,
+      ),
+  );
+}
+
+
+/* ============================================================
+   ASSIGNED APPLICATION LIST
+   ============================================================ */
+
+export async function listAssignedApplications(
+  instituteId,
+  staffUserId,
+  query,
+) {
+  return cachedRead(
+    cacheNs.APPLICATIONS_ASSIGNED,
+
+    [
+      instituteId,
+      staffUserId,
+      query,
+    ],
+
+    () =>
+      paginateApplications(
+        buildApplicationFilter(
+          instituteId,
+          query,
+          {
+            assignedTo:
+              staffUserId,
+          },
+        ),
+
+        query,
+      ),
+  );
+}
+
+
+/* ============================================================
+   STAFF ASSIGNMENT SUMMARY
+   ============================================================ */
+
+export async function getStaffAssignmentSummary(
+  instituteId,
+  staffUserId,
+) {
+  return cachedRead(
+    cacheNs.STAFF_ASSIGNMENT_SUMMARY,
+
+    [
+      instituteId,
+      staffUserId,
+    ],
+
+    async () => {
+      const baseFilter = {
+        instituteId,
+
+        assignedTo:
+          staffUserId,
+
+        status: {
+          $nin: [
+            APPLICATION_STATUS.DRAFT,
+            APPLICATION_STATUS.PENDING_AUTHORIZATION,
+          ],
+        },
+      };
+
+      const [
+        total,
+        submitted,
+        inReview,
+        needsCorrection,
+        admitted,
+        rejected,
+      ] = await Promise.all([
+        Application.countDocuments(
+          baseFilter,
+        ),
+
+        Application.countDocuments({
+          ...baseFilter,
+
+          status:
+            APPLICATION_STATUS.SUBMITTED,
+        }),
+
+        Application.countDocuments({
+          ...baseFilter,
+
+          status:
+            APPLICATION_STATUS.IN_REVIEW,
+        }),
+
+        Application.countDocuments({
+          ...baseFilter,
+
+          status:
+            APPLICATION_STATUS.NEEDS_CORRECTION,
+        }),
+
+        Application.countDocuments({
+          ...baseFilter,
+
+          status:
+            APPLICATION_STATUS.ADMITTED,
+        }),
+
+        Application.countDocuments({
+          ...baseFilter,
+
+          status:
+            APPLICATION_STATUS.REJECTED,
+        }),
+      ]);
+
+      return {
+        total,
+
+        submitted,
+
+        inReview,
+
+        needsCorrection,
+
+        admitted,
+
+        rejected,
+      };
+    },
+  );
+}
+
+
+/* ============================================================
+   APPLICATION DETAIL
+   ============================================================ */
+
+export async function getApplicationDetail(
+  instituteId,
+  applicationId,
+  user = null,
+) {
+  return cachedRead(
+    cacheNs.APPLICATION_DETAIL,
+
+    [
+      instituteId,
+      applicationId,
+      user?.userId,
+      user?.role,
+    ],
+
+    async () => {
+      const application =
+        await getInstituteApplication(
+          instituteId,
+          applicationId,
+        );
+
+      const [
+        context,
+        assignee,
+        aiDecisions,
+      ] = await Promise.all([
+        loadApplicationContext(
+          application,
+          instituteId,
+        ),
+
+        loadAssignee(
+          application,
+        ),
+
+        loadApplicationAiDecisions(
+          instituteId,
+          applicationId,
+        ),
+      ]);
+
+      return {
+        ...formatApplicationDetail(
+          application,
+          context.service,
+          context.offering,
+          assignee,
+          user,
+        ),
+
+        aiDecisions,
+      };
+    },
+  );
+}
+
+
+/* ============================================================
+   ASSIGNED APPLICATION DETAIL
+   ============================================================ */
+
+export async function getAssignedApplicationDetail(
+  instituteId,
+  applicationId,
+  staffUserId,
+  user = null,
+) {
+  return cachedRead(
+    cacheNs.APPLICATION_ASSIGNED_DETAIL,
+
+    [
+      instituteId,
+      applicationId,
+      staffUserId,
+      user?.userId,
+    ],
+
+    async () => {
+      const application =
+        await getAssignedApplication(
+          instituteId,
+          applicationId,
+          staffUserId,
+        );
+
+      const [
+        context,
+        assignee,
+        aiDecisions,
+      ] = await Promise.all([
+        loadApplicationContext(
+          application,
+          instituteId,
+        ),
+
+        loadAssignee(
+          application,
+        ),
+
+        loadApplicationAiDecisions(
+          instituteId,
+          applicationId,
+        ),
+      ]);
+
+      return {
+        ...formatApplicationDetail(
+          application,
+          context.service,
+          context.offering,
+          assignee,
+          user,
+        ),
+
+        aiDecisions,
+      };
+    },
+  );
+}
+
+
+/* ============================================================
+   STATUS UPDATE
+   ============================================================ */
+
+export async function updateApplicationStatus(
+  instituteId,
+  applicationId,
+  status,
+  user = null,
+) {
+  const application =
+    await getInstituteApplication(
+      instituteId,
+      applicationId,
+    );
+
+  return applyStatusChange(
+    application,
+    instituteId,
+    status,
+    user,
+  );
+}
+
+
+/* ============================================================
+   ASSIGNED STATUS UPDATE
+   ============================================================ */
+
+export async function updateAssignedApplicationStatus(
+  instituteId,
+  applicationId,
+  staffUserId,
+  status,
+  user = null,
+) {
+  const application =
+    await getAssignedApplication(
+      instituteId,
+      applicationId,
+      staffUserId,
+    );
+
+  return applyStatusChange(
+    application,
+    instituteId,
+    status,
+    user,
+  );
+}
+
+
+/* ============================================================
+   APPLY STATUS CHANGE
+   ============================================================ */
+
+async function applyStatusChange(
+  application,
+  instituteId,
+  status,
+  user = null,
+) {
+  const allowed =
+    STATUS_TRANSITIONS[
+      application.status
+    ] ?? [];
+
+  if (!allowed.includes(status)) {
+    throw new AppError(
+      `Cannot move this request from ${application.status} to ${status}`,
+      400,
+    );
+  }
+
+  application.status =
+    status;
+
+  await application.save();
+
+  const context =
+    await loadApplicationContext(
+      application,
+      instituteId,
+    );
+
+  const assignee =
+    await loadAssignee(
+      application,
+    );
+
+  notifyApplicationStatusChange(
+    application,
+    context,
+    status,
+  ).catch(() => {});
+
+  await flushInstituteReadCache(
+    instituteId,
+  );
+
+  return formatApplicationDetail(
+    application,
+    context.service,
+    context.offering,
+    assignee,
+    user,
+  );
+}
+
+
+/* ============================================================
+   WORKFLOW OUTCOME -> LEGACY STATUS
+   ============================================================ */
+
+function mapOutcomeToLegacyStatus(
+  outcome,
+) {
+  if (
+    outcome ===
+    OUTCOME_TYPE.APPROVED
+  ) {
+    return APPLICATION_STATUS.ADMITTED;
+  }
+
+  if (
+    outcome ===
+    OUTCOME_TYPE.REJECTED
+  ) {
+    return APPLICATION_STATUS.REJECTED;
+  }
+
+  if (
+    outcome ===
+    OUTCOME_TYPE.NEEDS_CORRECTION
+  ) {
+    return APPLICATION_STATUS.NEEDS_CORRECTION;
+  }
+
+  return null;
+}
+
+
+/* ============================================================
+   EXECUTE WORKFLOW ACTION
+   ============================================================ */
+
+async function executeWorkflowAction(
+  application,
+  instituteId,
+  user,
+  payload,
+  options = {},
+) {
+  if (
+    !WORKFLOW_ACTION_STATUSES.has(
+      application.status,
+    )
+  ) {
+    throw new AppError(
+      'This request is not awaiting workflow action',
+      400,
+    );
+  }
+
+  const step =
+    getCurrentWorkflowStep(
+      application,
+    );
+
+  if (!step) {
+    const legacyStatus =
+      mapOutcomeToLegacyStatus(
+        payload.outcome,
+      );
+
+    if (!legacyStatus) {
+      throw new AppError(
+        'Invalid workflow action',
+        400,
+      );
+    }
+
+    return applyStatusChange(
+      application,
+      instituteId,
+      legacyStatus,
+      user,
+    );
+  }
+
+  const outcome =
+    findStepOutcome(
+      step,
+      payload.outcome,
+    );
+
+  if (!outcome) {
+    throw new AppError(
+      'This action is not available for the current step',
+      400,
+    );
+  }
+
+  const escalated =
+    application.status ===
+    APPLICATION_STATUS.PENDING_AI_REVIEW;
+
+  if (
+    !canUserActOnWorkflowStep(
+      user,
+      step,
+      {
+        allowAiStep:
+          escalated,
+      },
+    )
+  ) {
+    throw new AppError(
+      'You are not allowed to act on the current workflow step',
+      403,
+    );
+  }
+
+  if (
+    payload.outcome ===
+      OUTCOME_TYPE.NEEDS_CORRECTION &&
+    !payload.note?.trim()
+  ) {
+    throw new AppError(
+      'Add a note explaining what the student should fix',
+      400,
+    );
+  }
+
+  const previousStatus =
+    application.status;
+
+  applyWorkflowOutcome(
+    application,
+    step,
+    outcome,
+    {
+      userId:
+        user.userId,
+
+      name:
+        user.name,
+
+      role:
+        user.role,
+    },
+    payload.note,
+    {
+      correctionRequiredDocuments:
+        payload.correctionRequiredDocuments,
+    },
+  );
+
+  let enqueueAiVerification =
+    false;
+
+  if (
+    application.status ===
+    APPLICATION_STATUS.IN_REVIEW
+  ) {
+    enqueueAiVerification =
+      settleAiWorkflowSteps(
+        application,
+        {
+          userId:
+            user.userId,
+
+          name:
+            user.name,
+
+          role:
+            user.role,
+        },
+      );
+  }
+
+  await refreshApplicationRuntime(
+    application,
+    instituteId,
+  );
+
+  await application.save();
+
+  if (
+    enqueueAiVerification
+  ) {
+    await enqueueApplicationAiVerification(
+      instituteId,
+      application._id.toString(),
+    ).catch(() => {});
+  }
+
+  const context =
+    await loadApplicationContext(
+      application,
+      instituteId,
+    );
+
+  const assignee =
+    await loadAssignee(
+      application,
+    );
+
+  if (
+    application.status !==
+    previousStatus
+  ) {
+    notifyApplicationStatusChange(
+      application,
+      context,
+      application.status,
+    ).catch(() => {});
+
+    const studentUser =
+      await User.findOne({
+        instituteId,
+
+        email:
+          application.applicantEmail,
+
+        role:
+          ROLES.STUDENT,
+      }).select('_id');
+
+    if (studentUser) {
+      createNotification({
+        instituteId,
+
+        userId:
+          studentUser._id.toString(),
+
+        type:
+          'status',
+
+        title:
+          'Request status updated',
+
+        body:
+          `Your request is now: ${application.status.replace(/_/g, ' ')}`,
+
+        link:
+          `/services/${application.serviceId.toString()}`,
+
+        metadata: {
+          applicationId:
+            application._id.toString(),
+
+          status:
+            application.status,
+        },
+      }).catch(() => {});
+    }
+
+    emitApplicationUpdated({
+      instituteId,
+
+      applicationId:
+        application._id.toString(),
+
+      studentUserId:
+        studentUser?._id?.toString() ??
+        null,
+
+      assigneeUserId:
+        assignee?._id?.toString() ??
+        application.assignedTo?.toString() ??
+        null,
+
+      summary: {
+        status:
+          application.status,
+
+        serviceId:
+          application.serviceId.toString(),
+
+        offeringId:
+          application.offeringId.toString(),
+
+        updatedAt:
+          application.updatedAt,
+      },
+    });
+  }
+
+  await flushInstituteReadCache(
+    instituteId,
+  );
+
+  return formatApplicationDetail(
+    application,
+    context.service,
+    context.offering,
+    assignee,
+    user,
+  );
+}
+
+
+/* ============================================================
+   ADMIN WORKFLOW ACTION
+   ============================================================ */
+
+export async function performApplicationWorkflowAction(
+  instituteId,
+  applicationId,
+  user,
+  payload,
+) {
+  const application =
+    await getInstituteApplication(
+      instituteId,
+      applicationId,
+    );
+
+  return executeWorkflowAction(
+    application,
+    instituteId,
+    user,
+    payload,
+  );
+}
+
+
+/* ============================================================
+   STAFF WORKFLOW ACTION
+   ============================================================ */
+
+export async function performAssignedApplicationWorkflowAction(
+  instituteId,
+  applicationId,
+  staffUserId,
+  user,
+  payload,
+) {
+  const application =
+    await getAssignedApplication(
+      instituteId,
+      applicationId,
+      staffUserId,
+    );
+
+  return executeWorkflowAction(
+    application,
+    instituteId,
+    user,
+    payload,
+  );
+}
+
+
+/* ============================================================
+   ASSIGN APPLICATION
+   ============================================================ */
+
+export async function assignApplication(
+  instituteId,
+  applicationId,
+  staffUserId,
+  adminUser,
+) {
+  const application =
+    await getInstituteApplication(
+      instituteId,
+      applicationId,
+    );
+
+  if (
+    application.status ===
+    APPLICATION_STATUS.DRAFT
+  ) {
+    throw new AppError(
+      'Only submitted requests can be assigned',
+      400,
+    );
+  }
+
+  const staff =
+    await User.findOne({
+      _id: staffUserId,
+
+      instituteId,
+
+      role:
+        ROLES.STAFF,
+
+      isActive: true,
+    }).select(
+      'name email staffRole',
+    );
+
+  if (!staff) {
+    throw new AppError(
+      'Staff member not found',
+      404,
+    );
+  }
+
+  application.assignedTo =
+    staff._id;
+
+  application.assignedAt =
+    new Date();
+
+  application.assignedBy =
+    adminUser.userId;
+
+  await application.save();
+
+  const context =
+    await loadApplicationContext(
+      application,
+      instituteId,
+    );
+
+  notifyApplicationAssigned(
+    application,
+    context,
+    staff,
+  ).catch(() => {});
+
+  await createNotification({
+    instituteId,
+
+    userId:
+      staffUserId,
+
+    type:
+      'assignment',
+
+    title:
+      'New request assigned',
+
+    body:
+      `${application.applicantName} — ${
+        context.offering?.name ??
+        'Service request'
+      }`,
+
+    link:
+      `/staff/applications/${application._id.toString()}`,
+
+    metadata: {
+      applicationId:
+        application._id.toString(),
+    },
+  });
+
+  const studentUser =
+    await User.findOne({
+      instituteId,
+
+      email:
+        application.applicantEmail,
+
+      role:
+        ROLES.STUDENT,
+    }).select('_id');
+
+  emitApplicationUpdated({
+    instituteId,
+
+    applicationId:
+      application._id.toString(),
+
+    studentUserId:
+      studentUser?._id?.toString() ??
+      null,
+
+    assigneeUserId:
+      staffUserId,
+
+    summary: {
+      status:
+        application.status,
+
+      serviceId:
+        application.serviceId.toString(),
+
+      offeringId:
+        application.offeringId.toString(),
+
+      assignedTo:
+        staffUserId,
+
+      updatedAt:
+        application.updatedAt,
+    },
+  });
+
+  await flushInstituteReadCache(
+    instituteId,
+  );
+
+  return formatApplicationDetail(
+    application,
+    context.service,
+    context.offering,
+    staff,
+    adminUser,
+  );
+}
+
+
+/* ============================================================
+   SLA
+   ============================================================ */
+
+async function finalizeSlaAction(
+  application,
+  instituteId,
+  {
+    staff,
+    actionLabel,
+  },
+  user,
+) {
+  const context =
+    await loadApplicationContext(
+      application,
+      instituteId,
+    );
+
+  const assignee =
+    staff ??
+    (await loadAssignee(
+      application,
+    ));
+
+  if (staff) {
+    notifyApplicationAssigned(
+      application,
+      context,
+      staff,
+    ).catch(() => {});
+
+    await createNotification({
+      instituteId,
+
+      userId:
+        staff._id.toString(),
+
+      type:
+        'assignment',
+
+      title:
+        'Escalated request assigned to you',
+
+      body:
+        `${application.applicantName} — ${
+          context.offering?.name ??
+          'Service request'
+        } (${actionLabel})`,
+
+      link:
+        `/staff/applications/${application._id.toString()}`,
+
+      metadata: {
+        applicationId:
+          application._id.toString(),
+
+        slaAction:
+          actionLabel,
+      },
+    });
+  }
+
+  const studentUser =
+    await User.findOne({
+      instituteId,
+
+      email:
+        application.applicantEmail,
+
+      role:
+        ROLES.STUDENT,
+    }).select('_id');
+
+  emitApplicationUpdated({
+    instituteId,
+
+    applicationId:
+      application._id.toString(),
+
+    studentUserId:
+      studentUser?._id?.toString() ??
+      null,
+
+    assigneeUserId:
+      assignee?._id?.toString() ??
+      null,
+
+    summary: {
+      status:
+        application.status,
+
+      serviceId:
+        application.serviceId.toString(),
+
+      offeringId:
+        application.offeringId.toString(),
+
+      assignedTo:
+        application.assignedTo?.toString() ??
+        null,
+
+      slaBreached:
+        false,
+
+      updatedAt:
+        application.updatedAt,
+    },
+  });
+
+  await flushInstituteReadCache(
+    instituteId,
+  );
+
+  return formatApplicationDetail(
+    application,
+    context.service,
+    context.offering,
+    assignee,
+    user,
+  );
+}
+
+
+/* ============================================================
+   RESPOND TO SLA
+   ============================================================ */
+
+export async function respondToSlaBreach(
+  instituteId,
+  applicationId,
+  payload,
+  user,
+) {
+  const application =
+    await getInstituteApplication(
+      instituteId,
+      applicationId,
+    );
+
+  if (
+    payload.action ===
+    'extend'
+  ) {
+    await extendApplicationSla(
+      application,
+      instituteId,
+    );
+
+    return finalizeSlaAction(
+      application,
+      instituteId,
+      {
+        staff:
+          null,
+
+        actionLabel:
+          'SLA extended',
+      },
+      user,
+    );
+  }
+
+  const {
+    staff,
+  } =
+    await escalateSlaBreach(
+      application,
+      instituteId,
+    );
+
+  if (!staff) {
+    throw new AppError(
+      'No available staff member to escalate this request to',
+      409,
+    );
+  }
+
+  return finalizeSlaAction(
+    application,
+    instituteId,
+    {
+      staff,
+
+      actionLabel:
+        'SLA escalated',
+    },
+    user,
+  );
+}
+
+
+/* ============================================================
+   RESPOND TO ASSIGNED SLA
+   ============================================================ */
+
+export async function respondToAssignedSlaBreach(
+  instituteId,
+  applicationId,
+  staffUserId,
+  payload,
+  user,
+) {
+  const application =
+    await getAssignedApplication(
+      instituteId,
+      applicationId,
+      staffUserId,
+    );
+
+  return respondToSlaBreach(
+    instituteId,
+    applicationId,
+    payload,
+    user,
+  );
+}
+
+
+/* ============================================================
+   STREAM ADMIN DOCUMENT
+   ============================================================ */
+
+export async function streamAdminApplicationDocument(
+  instituteId,
+  applicationId,
+  documentId,
+  res,
+  options = {},
+) {
+  const application =
+    await getInstituteApplication(
+      instituteId,
+      applicationId,
+    );
+
+  const document =
+    findApplicationDocument(
+      application,
+      documentId,
+    );
+
+  if (!document) {
+    throw new AppError(
+      'Document not found',
+      404,
+    );
+  }
+
+  await streamDocumentFile(
+    document,
+    res,
+    options,
+  );
+}
+
+
+/* ============================================================
+   STREAM STAFF DOCUMENT
+   ============================================================ */
+
+export async function streamAssignedApplicationDocument(
+  instituteId,
+  applicationId,
+  staffUserId,
+  documentId,
+  res,
+  options = {},
+) {
+  const application =
+    await getAssignedApplication(
+      instituteId,
+      applicationId,
+      staffUserId,
+    );
+
+  const document =
+    findApplicationDocument(
+      application,
+      documentId,
+    );
+
+  if (!document) {
+    throw new AppError(
+      'Document not found',
+      404,
+    );
+  }
+
+  await streamDocumentFile(
+    document,
+    res,
+    options,
+  );
+}
+
+
+/* ============================================================
+   STREAM DOCUMENT FILE
+   ============================================================ */
+
+export async function streamDocumentFile(
+  document,
+  res,
+  options = {},
+) {
+  if (!document?.filePath) {
+    throw new AppError(
+      'File not found',
+      404,
+    );
+  }
+
+  try {
+    await fs.access(
+      document.filePath,
+    );
+  } catch {
+    throw new AppError(
+      'File not found',
+      404,
+    );
+  }
+
+  const disposition =
+    options.download
+      ? 'attachment'
+      : 'inline';
+
+  res.setHeader(
+    'Content-Type',
+    document.mimeType,
+  );
+
+  res.setHeader(
+    'Content-Disposition',
+    `${disposition}; filename="${encodeURIComponent(
+      document.originalName,
+    )}"`,
+  );
+
+  createReadStream(
+    document.filePath,
+  ).pipe(res);
+}
